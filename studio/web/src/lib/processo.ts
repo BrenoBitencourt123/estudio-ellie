@@ -1,4 +1,4 @@
-import type { Biblioteca, ModeloVideo, PlanoProducao, Producao, Selecao } from '@/types/processo'
+import type { Biblioteca, Midia, ModeloVideo, PlanoProducao, Producao, Selecao } from '@/types/processo'
 
 async function request<T>(path: string, method = 'GET', body?: unknown, human = false): Promise<T> {
   const response = await fetch(`/api/processo${path}`, {
@@ -16,7 +16,9 @@ export const processo = {
   biblioteca: () => request<Biblioteca>('/biblioteca'),
   modelos: () => request<ModeloVideo[]>('/modelos'),
   status: () => request<{ dreamina: { conectado: boolean; instalada: boolean; erro?: string }; planejamento: string }>('/status'),
-  conversar: (id: string, texto: string, selecao?: Selecao) => request<Producao>(`/${id}/conversa`, 'POST', { texto, selecao }),
+  conversar: (id: string, texto: string, selecao?: Selecao, anexos: Midia[] = []) => request<Producao>(`/${id}/conversa`, 'POST', { texto, selecao, anexos }),
+  rascunho: (id: string) => request<{ texto: string; pensando: boolean }>(`/${id}/rascunho`),
+  descartar: (id: string, asset: Midia) => request<Producao>(`/${id}/descartar`, 'POST', { asset }),
   salvar: (p: Producao, plano: PlanoProducao) => request<Producao>(`/${p.id}/plano`, 'PUT', { versao: p.versao, plano }),
   cotar: (id: string, tomadas?: string[]) => request<{ iniciado: boolean }>(`/${id}/cotar`, 'POST', { tomadas }),
   gerar: (p: Producao, teto: number) => request(`/${p.id}/gerar`, 'POST', { cotacao_id: p.cotacao?.id, teto }, true),

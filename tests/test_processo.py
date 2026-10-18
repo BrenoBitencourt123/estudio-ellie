@@ -42,11 +42,14 @@ class FakeCli:
         return {'resourceId': resource}
 
     def import_node(self, *args):
-        return {'node': {'nodeId': args[2]}}
+        # Como a CLI real: sem node_id informado, ela gera e devolve um
+        self.nodes = getattr(self, 'nodes', 0) + 1
+        return {'node': {'nodeId': args[2] or f'node_cli_{self.nodes}'}}
 
-    def draft(self, *args):
+    def draft(self, shot, *args):
         self.version += 1
-        return {}
+        self.nodes = getattr(self, 'nodes', 0) + 1
+        return {'node': {'nodeId': shot.get('node_id') or f'node_cli_{self.nodes}'}}
 
 
 class ProductionTests(unittest.TestCase):

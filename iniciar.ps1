@@ -3,15 +3,24 @@ $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
 Set-Location -LiteralPath $root
 $pythonExe=(Get-Command $Python -ErrorAction Stop).Source
-$nodeExe=(Get-Command $Node -ErrorAction Stop).Source
-$nodeVersionText=& $nodeExe --version
-$nodeVersion=[version]($nodeVersionText.Trim().TrimStart('v'))
-if($nodeVersion.Major -lt 24){throw 'Instale Node.js 24 ou superior (a ponte OpenClaw usa TypeScript nativo).'}
+# Procura um Node 24+: o do PATH ou o que vem com o Codex (o mesmo que o openclaw-local.ps1 usa)
+$nodeCandidates=@()
+$nodeFound=Get-Command $Node -ErrorAction SilentlyContinue
+if($nodeFound){$nodeCandidates+=$nodeFound.Source}
+$nodeCandidates+=@(Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe')
+$nodeExe=$null
+foreach($candidate in $nodeCandidates){
+ if(Test-Path -LiteralPath $candidate){
+  $nodeVersion=[version]((& $candidate --version).Trim().TrimStart('v'))
+  if($nodeVersion.Major -ge 24){$nodeExe=$candidate;break}
+ }
+}
+if(-not $nodeExe){throw 'Instale Node.js 24 ou superior (a ponte OpenClaw usa TypeScript nativo).'}
 & $pythonExe -c 'import fastapi,uvicorn,PIL,requests,multipart'
 if($LASTEXITCODE -ne 0){throw 'Instale as dependências: python -m pip install -r requirements.txt'}
 if(Test-Path -LiteralPath (Join-Path $root '.env')){
  foreach($line in Get-Content -LiteralPath (Join-Path $root '.env')){
-  if($line -match '^(OPENCLAW_AGENTE|OPENCLAW_URL|DREAMINA_CLI)=(.*)$'){
+  if($line -match '^(OPENCLAW_AGENTE|OPENCLAW_URL|OPENCLAW_AGENTE_CHAT|OPENCLAW_AGENTE_RESERVA|DREAMINA_CLI)=(.*)$'){
    [Environment]::SetEnvironmentVariable($Matches[1],$Matches[2].Trim().Trim('"'), 'Process')
   }
  }

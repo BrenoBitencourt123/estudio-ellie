@@ -427,6 +427,38 @@ def perguntar_ia(texto: str, imagens: list[Path], tempo_maximo_s: int = 600) -> 
     return dados.get("texto", "")
 
 
+def conversar_ia(pedido: dict, ao_delta) -> dict:
+    """Conversa contínua pela ponte (sessão por produção, modelo com reserva). Lê o texto parcial enquanto chega."""
+    try:
+        r = requests.post(f"{URL_IA}/ia/conversar", json={**pedido, "tempoMaximoMs": 600_000}, stream=True, timeout=(10, 630))
+    except requests.RequestException:
+        raise RuntimeError("O serviço de IA do Estúdio (janela 'Estudio Ellie - MCP') não está aberto.")
+    if r.status_code != 200:
+        dados = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        raise RuntimeError(dados.get("erro") or f"erro {r.status_code} na ponte com o OpenClaw")
+    try:
+        for linha in r.iter_lines(decode_unicode=True):
+            if not linha:
+                continue
+            item = json.loads(linha)
+            if "delta" in item:
+                ao_delta(item["delta"], bool(item.get("substituir")))
+            elif "fim" in item:
+                return item["fim"]
+            elif "erro" in item:
+                raise RuntimeError(item["erro"])
+    except requests.RequestException:
+        raise RuntimeError("A conexão com a ponte caiu no meio da resposta. A conversa foi preservada.")
+    raise RuntimeError("A ponte encerrou sem resposta final.")
+
+
+@app.get("/api/versao")
+def versao_interface():
+    """A página compara isto de tempos em tempos e se recarrega quando a interface compilada muda."""
+    indice = PASTA / "studio" / "web" / "dist" / "index.html"
+    return {"interface": int(indice.stat().st_mtime) if indice.exists() else 0}
+
+
 @app.get("/api/ia/status")
 def status_ia():
     try:
@@ -1159,36 +1191,49 @@ def salvar_referencias_coladas(dados: list[str]) -> list[Path]:
     return caminhos
 
 
-@app.post("/api/midia/gerar")
-def gerar_midia(m: PedidoNovaMidia):
-    """Cria uma imagem com IA quando o Breno quiser (não depende do plano). Leva de 30s a 1,5 min.
-    Aceita imagens coladas como referência: a IA recria a roupa (ou o lugar) igual à imagem."""
-    coladas = salvar_referencias_coladas(m.referencias_coladas)
-    if not m.descricao.strip() and not coladas:
+def gerar_com_referencias(pasta: str, descricao: str, nome: str, coladas: list[Path], usar_ellie: bool = False,
+                          fotos_ellie: list[str] | None = None, escopo: str = "look") -> str:
+    """Gera uma imagem a partir de referências coladas (e opcionalmente das fotos da Ellie). Devolve o nome do arquivo.
+    Usada pelo endpoint antigo e pelo chat novo (Ctrl+V)."""
+    if not descricao.strip() and not coladas:
         raise HTTPException(400, "Descreva a imagem ou cole uma imagem de referência.")
     fotos: list[Path] = []
-    if m.usar_fotos_ellie or m.pasta in ("base", "persona"):
-        nomes = m.fotos_ellie or obter_assets().get("persona", [])[:2]
+    if usar_ellie or pasta in ("base", "persona"):
+        nomes = fotos_ellie or obter_assets().get("persona", [])[:2]
         fotos = [resolver("persona", n) for n in nomes[:3]]
-    look = m.pasta == "pecas" and m.escopo == "look"
-    alvo = "the COMPLETE outfit (every garment, the shoes and the bag or accessories)" if look else O_QUE_COPIAR[m.pasta]
+    look = pasta == "pecas" and escopo == "look"
+    alvo = "the COMPLETE outfit (every garment, the shoes and the bag or accessories)" if look else O_QUE_COPIAR[pasta]
     instrucao = ""
     if coladas:
         instrucao = (
             f"The first {len(coladas)} attached image(s) are references from the creator: recreate {alvo} exactly as "
             "shown (same colours, fabric, pattern, cut, length and details). "
             + ("When there are several reference images, combine the pieces from all of them into ONE outfit. "
-               if len(coladas) > 1 else "")
+               if len(coladas) > 1 and pasta != "cenarios" else "")
             + "Ignore any person, background, text, price tags and watermarks in them. "
             "Pass all attached images to the image tool as reference images."
         )
+        if pasta == "cenarios":
+            instrucao = (
+                f"The first {len(coladas)} attached image(s) are references from the creator: recreate the PLACE "
+                "(same room or street, architecture, furniture, colours, materials and light), completely empty. "
+                "Remove any person, text, stickers and watermarks. Pass all attached images to the image tool as reference images."
+            )
         if fotos:
             instrucao += (f" The last {len(fotos)} attached images are photos of Ellie: keep her face, hair and body, "
                           "never the face or body of anyone in the reference images.")
-    descricao = m.descricao.strip() or f"Recreate {alvo} from the reference image(s)."
-    nome = m.nome or ("look_" if look else "")
-    return {"pasta": m.pasta, "nome": gerar_midia_ia(m.pasta, descricao, nome, coladas + fotos, instrucao,
-                                                      ESTILO_LOOK if look else "")}
+    descricao = descricao.strip() or f"Recreate {alvo} from the reference image(s)."
+    nome = nome or ("look_" if look else "")
+    return gerar_midia_ia(pasta, descricao, nome, coladas + fotos, instrucao, ESTILO_LOOK if look else "")
+
+
+@app.post("/api/midia/gerar")
+def gerar_midia(m: PedidoNovaMidia):
+    """Cria uma imagem com IA quando o Breno quiser (não depende do plano). Leva de 30s a 1,5 min.
+    Aceita imagens coladas como referência: a IA recria a roupa (ou o lugar) igual à imagem."""
+    coladas = salvar_referencias_coladas(m.referencias_coladas)
+    return {"pasta": m.pasta, "nome": gerar_com_referencias(m.pasta, m.descricao, m.nome, coladas, m.usar_fotos_ellie,
+                                                            m.fotos_ellie, m.escopo)}
 
 
 # Criar mídia A PARTIR DO VÍDEO de referência: a roupa, o lugar ou a Ellie com aquela roupa
@@ -2067,7 +2112,7 @@ def apagar_receita(nome: str):
 
 # Fluxo conversacional v2: reutiliza biblioteca, extrator de quadros e ponte OpenClaw.
 from studio.processo import create_router as criar_processo_router
-app.include_router(criar_processo_router(PASTA, perguntar_ia))
+app.include_router(criar_processo_router(PASTA, perguntar_ia, gerar_com_referencias, conversar_ia))
 
 # Arquivos servidos pro navegador (só leitura)
 for _chave, _pasta in PASTAS.items():

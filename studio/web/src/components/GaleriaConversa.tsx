@@ -3,7 +3,7 @@ import { processo, urlMidia } from '@/lib/processo'
 import type { Biblioteca, Bloco, PastaMidia, Producao, Selecao } from '@/types/processo'
 import ConversaModal from './ConversaModal'
 
-const nomes: Record<PastaMidia, string> = { persona: 'Modelo', base: 'Estados do look', pecas: 'Peças', cenarios: 'Cenários', movimentos: 'Movimento', saida: 'Vídeos prontos' }
+const nomes: Record<PastaMidia, string> = { persona: 'Modelo', base: 'Estados do look', pecas: 'Peças', cenarios: 'Cenários', movimentos: 'Movimento', saida: 'Vídeos prontos', anexos: 'Colados' }
 export default function GaleriaConversa({ bloco, biblioteca, producao, escolher, fechar, atualizar }: {
   bloco: Bloco; biblioteca: Biblioteca; producao: Producao | null
   escolher: (s: Selecao) => Promise<void>; fechar: () => void; atualizar: () => Promise<void>

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -25,14 +26,25 @@ class Dreamina:
             raise CliError("CLI Dreamina não encontrada. Instale a CLI ou configure DREAMINA_CLI.") from None
         except subprocess.TimeoutExpired:
             raise CliError("A CLI não respondeu a tempo. Preserve os identificadores e consulte o andamento; não reenvie a geração.") from None
-        try:
-            data = json.loads(process.stdout)
-        except ValueError:
-            raise CliError("A CLI não devolveu JSON válido. Confira a versão instalada.") from None
+        data = None
+        for saida in (process.stdout, process.stderr):  # erros podem vir em JSON pelo stderr
+            try:
+                data = json.loads(saida)
+                break
+            except (ValueError, TypeError):
+                continue
+        if data is None:
+            # Mostra o que a CLI respondeu (sem possíveis tokens) para o erro real não ficar escondido
+            bruto = re.sub(r"(?i)(token|secret|key|code)[=:]\s*\S+", r"\1=***", (process.stderr or process.stdout or "").strip())[:300]
+            dica = " Parece falta de login: rode `dreamina-canvas auth login`." if re.search(r"(?i)log ?in|sign.?in|auth|unauthori", bruto) else ""
+            raise CliError(f"A CLI não devolveu JSON válido.{dica} Resposta: {bruto or 'vazia'}")
         if process.returncode or not data.get("ok"):
             error = data.get("error", {})
             # Não propagar envelopes de confirmação: podem conter tokens.
-            raise CliError(f"Dreamina: {error.get('code', 'erro')} — {error.get('message', 'operação não concluída')}")
+            validacao = error.get("validation") or {}
+            detalhe = " ".join(str(validacao.get(k, "")) for k in ("reasonCode", "fieldPath", "detail") if validacao.get(k))
+            raise CliError(f"Dreamina: {error.get('code', 'erro')} — {error.get('message', 'operação não concluída')}"
+                           + (f" ({detalhe[:400]})" if detalhe else "") + f" [comando: {' '.join(map(str, args[:2]))}]")
         return data.get("data", {})
 
     def status(self) -> dict:
@@ -82,14 +94,34 @@ class Dreamina:
         return self.call("resource", "upload", "--file", str(path), "--project-id", project,
                          "--resource-id", resource, "--import-kind", kind, timeout=240)
 
-    def import_node(self, type: str, resource: str, node: str, project: str, submit: str, title: str, kind: str = "local_upload") -> dict:
-        return self.call("node", "create", type, "--project-id", project, "--node-id", node,
+    @staticmethod
+    def node_id(data) -> str:
+        """Acha o node_id que a CLI devolveu (o formato é dela; não inventamos)."""
+        if isinstance(data, dict):
+            for chave in ("nodeId", "node_id"):
+                if isinstance(data.get(chave), str) and data[chave]:
+                    return data[chave]
+            for valor in data.values():
+                achado = Dreamina.node_id(valor)
+                if achado:
+                    return achado
+        elif isinstance(data, list):
+            for valor in data:
+                achado = Dreamina.node_id(valor)
+                if achado:
+                    return achado
+        return ""
+
+    def import_node(self, type: str, resource: str, node: str | None, project: str, submit: str, title: str, kind: str = "local_upload") -> dict:
+        # Sem --node-id na criação: a CLI gera um ID válido e o devolve. Com ID (já criado pela CLI), atualiza o mesmo nó.
+        return self.call("node", "create", type, "--project-id", project, *(["--node-id", node] if node else []),
                          "--title", title, "--resource-id", resource, "--import-kind", kind, "--submit-id", submit)
 
     def draft(self, shot: dict, project: str, refs: list[str]) -> dict:
         # Os vínculos do prompt apontam para os mesmos nós passados em --ref.
         prompt = "\n".join(f"Reference {i+1}: {{{{node:{ref}}}}}" for i, ref in enumerate(refs)) + "\n" + shot["prompt"]
-        args = ["node", "create", "video", "--project-id", project, "--node-id", shot["node_id"],
+        args = ["node", "create", "video", "--project-id", project,
+                *(["--node-id", shot["node_id"]] if shot.get("node_id") else []),
                 "--title", shot["titulo"], "--model", shot["modelo"], "--mode", shot["modo"],
                 "--resolution", shot["resolucao"], "--ratio", "9:16", "--duration", str(shot["duracao"]),
                 "--count", "1", "--prompt", prompt]

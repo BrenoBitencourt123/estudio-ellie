@@ -1,6 +1,13 @@
-import { useState } from 'react'
-import { processo, urlResultado } from '@/lib/processo'
-import type { Bloco, Producao } from '@/types/processo'
+import { useEffect, useState } from 'react'
+import { processo, urlMidia, urlResultado } from '@/lib/processo'
+import type { Bloco, Producao, Tomada } from '@/types/processo'
+
+function estadoTomada(s: Tomada): { chave: string; rotulo: string } {
+  if (s.arquivo) return { chave: 'pronta', rotulo: 'Pronta ✓' }
+  if (s.submit_id && ['failed', 'canceled', 'cancelled'].includes(s.estado ?? '')) return { chave: 'falhou', rotulo: 'Falhou' }
+  if (s.submit_id) return { chave: 'gerando', rotulo: 'Gerando…' }
+  return { chave: 'nova', rotulo: 'Ainda não gerada' }
+}
 
 export default function CartaoProducao({ bloco, producao, abrir, responder, atualizar }: {
   bloco: Bloco; producao: Producao; abrir: (b: Bloco) => void; responder: (texto: string) => void; atualizar: () => Promise<void>
@@ -18,6 +25,12 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
   const waiting = producao.tomadas.some(s => s.submit_id && !s.arquivo)
   const ready = producao.tomadas.every(s => s.arquivo)
   const active = busy || producao.ocupado
+  // Lote da próxima cotação: no modo teste, só a transformação (lado esquerdo)
+  const lote = teste && pending.length > 1 ? [pending.find(s => s.lado === 'esquerda') ?? pending[0]] : pending
+  // Só mostra a cotação se ela é deste lote e ainda não foi usada
+  const cotacaoAtual = producao.cotacao && !producao.cotacao.executada
+    && (producao.cotacao.tomadas ?? []).every(id => pending.some(s => s.id === id)) ? producao.cotacao : null
+  useEffect(() => { setTeto('') }, [cotacaoAtual?.id])
   return <section className={`conversation-card card-${bloco.tipo}`}>
     {bloco.titulo && <h3>{bloco.titulo}</h3>}
     {bloco.tipo === 'quiz' && <><p>{bloco.pergunta}</p><div className="quiz-options">{bloco.opcoes?.map(o =>
@@ -28,21 +41,35 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
       <ol>{producao.tomadas.map(s => <li key={s.id}><strong>{s.titulo}</strong><span>{s.duracao}s · {s.arquivo ? 'arquivo disponível' : s.modelo.replaceAll('_', ' ')}</span></li>)}</ol>
       <button className="secondary-button" onClick={() => abrir(bloco)}>Ver e ajustar a estrutura</button></>}
     {bloco.tipo === 'custo' && <>
-      <div className="cost-heading"><span>Custo desta geração</span><strong>{producao.cotacao ? `${producao.cotacao.total.toLocaleString('pt-BR')} créditos` : 'Ainda não cotado'}</strong></div>
-      <p>{pending.length} tomadas novas. Arquivos prontos serão reaproveitados.</p>
-      {pending.length > 1 && <label className="pilot-choice"><input type="checkbox" checked={teste} onChange={e => setTeste(e.target.checked)} />
-        Testar primeiro só a transformação, antes de pagar as outras tomadas.</label>}
-      {producao.cotacao?.executada && <p className="success-note">Este lote já foi enviado. Acompanhe o resultado antes de cotar outra tomada.</p>}
-      {producao.cotacao && <><details><summary>O que entra nesta cotação</summary>{producao.cotacao.itens.map((q, i) =>
-        <p key={q.nodeId}>Tomada {i + 1}<strong className="cost-number">{q.maxCredits} créditos</strong></p>)}</details>
-        <label className="field">Meu teto para este lote (créditos)<input type="number" min={producao.cotacao.total} placeholder={String(producao.cotacao.total)} value={teto} onChange={e => setTeto(e.target.value)} /></label>
-      </>}
-      <div className="card-buttons"><button className="secondary-button" disabled={active || !pending.length || waiting} onClick={() => void action(() => processo.cotar(producao.id,
-        teste && pending.length > 1 ? [pending.find(s => s.lado === 'esquerda')?.id ?? pending[0].id] : pending.map(s => s.id)))}>Consultar custo real</button>
-        {producao.cotacao && !producao.cotacao.executada && <button className="primary-button" disabled={active || Number(teto) < producao.cotacao.total || !pending.length}
-          onClick={() => void action(() => processo.gerar(producao, Number(teto)))}>Autorizar e gerar · {producao.cotacao.total} créditos</button>}
-        {waiting && <button className="secondary-button" disabled={active} onClick={() => void action(() => processo.acompanhar(producao.id))}>Acompanhar e baixar</button>}</div>
-      <small>Consulta de preço não gera vídeo. A assinatura do chat e os créditos Dreamina são separados.</small>
+      {/* Situação de cada tomada: o que já está pronto aparece aqui mesmo, para assistir antes de gastar mais */}
+      <ul className="shot-status">{producao.tomadas.map(s => {
+        const st = estadoTomada(s)
+        return <li key={s.id} className={`shot-${st.chave}`}>
+          <div className="shot-head"><strong>{s.titulo}</strong><span className={`chip chip-${st.chave}`}>{st.rotulo}</span></div>
+          <small>{s.lado === 'esquerda' ? 'Lado esquerdo' : 'Lado direito'} · {s.duracao}s{typeof s.creditos_registrados === 'number' ? ` · ${s.creditos_registrados} créditos gastos` : ''}</small>
+          {s.arquivo && <video className="shot-video" src={`${urlMidia(s.arquivo.pasta, s.arquivo.nome)}#t=0.8`} controls playsInline preload="metadata" />}
+        </li>
+      })}</ul>
+      {waiting && <p className="progress-note" role="status">Gerando no Dreamina. O Estúdio confere sozinho a cada poucos segundos e baixa quando ficar pronto.</p>}
+      {ready && <div className="next-step"><p><strong>Todas as tomadas prontas.</strong> Agora é montar o vídeo final, sem gastar créditos.</p>
+        <button className="primary-button" disabled={active} onClick={() => void action(() => processo.montar(producao.id))}>{active ? 'Montando…' : 'Montar vídeo · sem créditos'}</button></div>}
+      {!ready && !waiting && pending.length > 0 && <div className="next-step">
+        <div className="cost-heading"><span>Próximo lote: {lote.map(s => s.titulo).join(' + ')}</span>
+          <strong>{cotacaoAtual ? `${cotacaoAtual.total.toLocaleString('pt-BR')} créditos` : 'Ainda não cotado'}</strong></div>
+        {pending.length > 1 && <label className="pilot-choice"><input type="checkbox" checked={teste} disabled={active} onChange={e => setTeste(e.target.checked)} />
+          Testar primeiro só a transformação, antes de pagar as outras tomadas.</label>}
+        {cotacaoAtual && <label className="field">Meu teto para este lote (créditos)
+          <input type="number" min={cotacaoAtual.total} placeholder={String(cotacaoAtual.total)} value={teto} onChange={e => setTeto(e.target.value)} /></label>}
+        <div className="card-buttons">
+          <button className="secondary-button" disabled={active} onClick={() => void action(() => processo.cotar(producao.id, lote.map(s => s.id)))}>
+            {active ? 'Aguarde…' : cotacaoAtual ? 'Consultar de novo' : 'Consultar custo real'}</button>
+          {cotacaoAtual && <button className="primary-button" disabled={active || Number(teto) < cotacaoAtual.total}
+            onClick={() => void action(() => processo.gerar(producao, Number(teto)))}>Autorizar e gerar · {cotacaoAtual.total} créditos</button>}
+        </div>
+        {cotacaoAtual && Number(teto) < cotacaoAtual.total && <small>Digite um teto de pelo menos {cotacaoAtual.total} para liberar a geração.</small>}
+      </div>}
+      {waiting && <div className="card-buttons"><button className="secondary-button" disabled={active} onClick={() => void action(() => processo.acompanhar(producao.id))}>{active ? 'Conferindo…' : 'Conferir agora'}</button></div>}
+      <small>Consultar o preço não gera vídeo nem gasta créditos. Só "Autorizar e gerar" gasta, até o teto que você digitar.</small>
     </>}
     {bloco.tipo === 'edicao' && <><p>Texto, faixa e cortes mudam localmente, aproveitando os vídeos.</p><div className="card-buttons">
       <button className="secondary-button" onClick={() => abrir(bloco)}>Editar texto e faixa</button>
@@ -52,6 +79,13 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
       <div className="card-buttons"><a className="primary-button" href={urlResultado(producao.id)} download>Baixar vídeo</a>
         <button className="secondary-button" onClick={() => void navigator.clipboard.writeText(producao.legenda)}>Copiar legenda</button></div>
       <p className="caption-preview">{producao.legenda}</p></> : <p>A montagem ainda não foi concluída.</p>)}
+    {bloco.tipo === 'imagem' && bloco.pasta && (bloco.descartado ? <p className="discarded-note">Imagem descartada (está na pasta lixeira).</p> : <>
+      <div className="generated-images">{bloco.nomes?.map(nome => <a key={nome} href={urlMidia(bloco.pasta!, nome)} target="_blank" rel="noreferrer">
+        <img src={urlMidia(bloco.pasta!, nome)} alt="Imagem gerada" /></a>)}</div>
+      {bloco.gerada && <div className="card-buttons"><button className="secondary-button" disabled={active} onClick={() => responder('gera outra versão')}>Outra versão</button>
+        {bloco.nomes?.map(nome => <button key={nome} className="secondary-button" disabled={active}
+          onClick={() => void action(() => processo.descartar(producao.id, { pasta: bloco.pasta!, nome }))}>Descartar</button>)}</div>}
+      {bloco.gerada && <small>Salva em {bloco.pasta} na biblioteca.</small>}</>)}
     {bloco.tipo === 'conexao' && <p>Abra o OpenClaw com a assinatura conectada. Depois, envie sua mensagem novamente. A produção está salva.</p>}
     {erro && <p role="alert" className="error-message">{erro}</p>}
   </section>

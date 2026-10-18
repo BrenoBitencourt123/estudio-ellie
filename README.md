@@ -4,6 +4,16 @@ Você conversa com a diretora de produção. Ela organiza o vídeo e mostra perg
 
 Esta versão evolui o sistema enviado em `estudio-ellie.zip`: preserva a biblioteca, o extrator de quadros, a ponte OpenClaw e o código anterior de geração/edição. O caminho principal foi substituído por produção conversacional com Dreamina e montagem local. O ZIP original permanece intacto. Veja [as mudanças e decisões](docs/ARQUITETURA_E_MIGRACAO.md).
 
+## Abrir (jeito fácil)
+
+Rode uma vez `./instalar-atalhos.ps1`. Ele cria **Estúdio Ellie** e **Parar Estúdio Ellie** na área de trabalho e faz o Estúdio ligar sozinho com o Windows. Tudo roda em segundo plano, sem janelas de terminal, por `studio/supervisor.py`:
+
+- sobe o servidor e a ponte, e sobe de novo o que cair;
+- quando um arquivo do sistema muda (atualização ou correção), espera terminar o que estiver em andamento (resposta da IA, imagem, vídeo) e reinicia só a parte que mudou;
+- a página no navegador se recarrega sozinha quando a interface muda, mantendo o texto digitado.
+
+Registro: `studio/dados/logs/supervisor.log`. O Gateway do OpenClaw continua sendo aberto pelo OpenClaw.
+
 ## Abrir
 
 Requisitos: Windows, Python 3.12+, Node.js 24+, FFmpeg/FFprobe no PATH, OpenClaw configurado e CLI Dreamina instalada. O ZIP inclui a interface compilada; ao clonar do GitHub, o instalador compila a interface localmente.
@@ -28,9 +38,13 @@ Conte a ideia no chat. A IA pode mostrar:
 - controles de texto, faixa, legenda e montagem;
 - o vídeo final e os botões de download e copiar legenda.
 
+**Colar imagem (Ctrl+V):** cole, arraste ou use o **+** do chat. A imagem vira um chip com **×** para remover antes de enviar. Se a mensagem disser o que fazer (“cenário”, “roupa”, “Ellie com essa roupa”, “só guardar”), o Estúdio resolve sem chamar a IA do chat e gera com o GPT Image (`gpt-image-2` pelo OpenClaw, login Codex) em segundo plano. Sem texto, aparece um quiz de 1 clique. Pedidos mais elaborados vão para a IA com a imagem anexada, e ela pode pedir a geração. “Gera outra versão” repete o último pedido. **Descartar** move o arquivo para `lixeira/`, sem apagar. As imagens coladas ficam em `anexos/`.
+
 As janelas também podem ser abertas pelos atalhos do chat. A produção pode ser retomada em **Suas produções**; em telas menores, use **Conversas**.
 
 O ZIP de demonstração inclui o exemplo **“Verão → outono · exemplo pronto”**, o vídeo desta conversa e duas fontes locais para remontagem. Funciona para experimentar a edição sem acessar o Dreamina. A fonte de outono deste exemplo já está montada: é reaproveitamento do V7, não um teste que provou gerar toda a transformação numa única tomada. O GitHub contém somente código e documentação; referências e vídeos pessoais ficam no computador e devem ser anexados pela biblioteca após a instalação.
+
+**Claude + GPT no chat:** configure `OPENCLAW_MODELO_CHAT` (ex.: Claude) e `OPENCLAW_MODELO_RESERVA` (ex.: GPT) no `.env`; a reserva assume sozinha se o principal falhar. Cada produção mantém uma sessão contínua: a primeira mensagem leva o contexto completo e as próximas só o que mudou. A resposta aparece enquanto chega, e cada uma mostra modelo, tokens e tempo. [Como configurar](docs/OPENCLAW_ASSINATURAS.md).
 
 ## Assinatura e créditos são separados
 

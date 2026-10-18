@@ -1,12 +1,13 @@
-export type PastaMidia = 'persona' | 'base' | 'pecas' | 'cenarios' | 'movimentos' | 'saida'
+export type PastaMidia = 'persona' | 'base' | 'pecas' | 'cenarios' | 'movimentos' | 'saida' | 'anexos'
 export type Midia = { pasta: PastaMidia; nome: string }
 export type Biblioteca = Record<PastaMidia, string[]>
 export type Bloco = {
-  tipo: 'galeria' | 'quiz' | 'plano' | 'custo' | 'resultado' | 'upload' | 'edicao' | 'conexao'
+  tipo: 'galeria' | 'quiz' | 'plano' | 'custo' | 'resultado' | 'upload' | 'edicao' | 'conexao' | 'imagem'
   titulo?: string; pasta?: PastaMidia; papel?: 'movimento' | 'master' | 'estado' | 'bruto'
-  nomes?: string[]; pergunta?: string; opcoes?: string[]
+  nomes?: string[]; pergunta?: string; opcoes?: string[]; descartado?: boolean; gerada?: boolean
 }
-export type MensagemChat = { id: string; papel: 'user' | 'assistant'; texto: string; blocos?: Bloco[]; criado: string }
+export type UsoIA = { modelo?: string; modo?: 'delta' | 'completo'; segundos?: number; usage?: Record<string, unknown> | null; tentativas?: number; caracteres?: number }
+export type MensagemChat = { id: string; papel: 'user' | 'assistant'; texto: string; blocos?: Bloco[]; anexos?: Midia[]; criado: string; ia?: UsoIA }
 export type Tomada = {
   id: string; titulo: string; lado: 'esquerda' | 'direita'; modelo: string; modo: 'm2v' | 'first_last_frame'
   resolucao: '480p' | '720p' | '1080p'; duracao: number; prompt: string; imagens: Midia[]

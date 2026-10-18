@@ -17,13 +17,15 @@ from studio.dreamina import Dreamina
 from studio.montagem import montar, preparar_referencia, probe, sha256
 from studio.producao_store import Store, agora
 
-PASTAS = ("persona", "base", "pecas", "cenarios", "movimentos", "saida")
+PASTAS = ("persona", "base", "pecas", "cenarios", "movimentos", "saida", "anexos")
+# Destinos de imagem gerada a partir do que o Breno cola no chat
+DESTINOS_IMAGEM = ("cenarios", "pecas", "base", "persona")
 VIDEO = {".mp4", ".mov", ".webm", ".m4v"}
 IMAGEM = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 class Asset(BaseModel):
-    pasta: Literal["persona", "base", "pecas", "cenarios", "movimentos", "saida"]
+    pasta: Literal["persona", "base", "pecas", "cenarios", "movimentos", "saida", "anexos"]
     nome: str = Field(min_length=1, max_length=180, pattern=r"^[^/\\]+$")
 
 
@@ -86,6 +88,51 @@ class Selecao(BaseModel):
 class Mensagem(BaseModel):
     texto: str = Field(default="", max_length=6000)
     selecao: Selecao | None = None
+    # Imagens coladas (Ctrl+V) e já enviadas para a pasta anexos
+    anexos: list[Asset] = Field(default_factory=list, max_length=4)
+
+
+class Descartar(BaseModel):
+    asset: Asset
+
+
+# ---------------------------------------------------------------------------
+# Roteador local: decide o que fazer com imagens coladas SEM gastar uma chamada de IA.
+# Só quando a intenção fica ambígua a conversa vai para o modelo.
+# ---------------------------------------------------------------------------
+def _sem_acento(texto: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", texto.lower()) if unicodedata.category(c) != "Mn")
+
+
+OPCOES_IMAGEM = {
+    "Criar cenário a partir dela": "cenarios",
+    "Recriar a roupa": "pecas",
+    "Ellie usando essa roupa": "base",
+    "Só guardar na biblioteca": "guardar",
+}
+_PADROES_INTENCAO = (
+    ("guardar", r"^(so |apenas )?(guarda|guardar|salva|salvar)\b|so guardar"),
+    ("base", r"ellie (com|usando|vestindo)|ela (com|usando|vestindo)|com essa roupa|vestida"),
+    ("cenarios", r"cenario|fundo|lugar|ambiente|locacao|background|quarto|sala|rua|provador"),
+    ("pecas", r"roupa|peca|look|outfit|vestido|saia|blusa|camisa|calca|bota|sapato|bolsa|colete|casaco"),
+)
+_PADRAO_VARIACAO = r"outra (versao|opcao|variacao)|de novo|refaz|refazer|variacao|gera outra|mais uma"
+
+
+def intencao_imagem(texto: str) -> str | None:
+    """Intenção para imagens coladas: pasta de destino, 'guardar' ou None (ambíguo)."""
+    if texto in OPCOES_IMAGEM:
+        return OPCOES_IMAGEM[texto]
+    limpo = _sem_acento(texto.strip())
+    for destino, padrao in _PADROES_INTENCAO:
+        if re.search(padrao, limpo):
+            return destino
+    return None
+
+
+def pede_variacao(texto: str) -> bool:
+    return bool(re.search(_PADRAO_VARIACAO, _sem_acento(texto.strip())))
 
 
 class Gerar(BaseModel):
@@ -127,10 +174,15 @@ def plano_inicial() -> dict:
 
 
 class Processo:
-    def __init__(self, root: Path, ask, cli=None, store=None):
+    def __init__(self, root: Path, ask, cli=None, store=None, imagem=None, conversar=None):
         self.root = root.resolve()
         self.store = store or Store(root / "studio" / "dados" / "producoes.sqlite3")
         self.ask = ask
+        # imagem(pasta, descricao, nome, referencias: list[Path], usar_ellie: bool) -> nome do arquivo gerado
+        self.imagem = imagem
+        # conversar(pedido: dict, ao_delta) -> {"texto","modelo","modo","usage","segundos","tentativas"}
+        self.conversar_ia = conversar
+        self.rascunhos: dict[str, str] = {}
         self.cli = cli or Dreamina()
         self.lock = threading.RLock()
         self.busy: set[str] = set()
@@ -221,46 +273,267 @@ class Processo:
         if request.selecao:
             p = self.select_reference(id, request.selecao)
         text = request.texto.strip() or ("Escolhi " + request.selecao.asset.nome if request.selecao else "")
-        if not text:
+        anexos = [a.model_dump() for a in request.anexos]
+        for a in anexos:
+            self.asset(a)  # valida que o arquivo existe na biblioteca
+        if not text and not anexos:
             raise ValueError("Escreva sua ideia ou escolha uma referência.")
-        p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "user", "texto": text, "criado": agora()})
+        user = {"id": uuid.uuid4().hex, "papel": "user", "texto": text, "criado": agora()}
+        if anexos:
+            user["anexos"] = anexos
+            p["anexos_pendentes"] = anexos
+            p["anexos_idade"] = 0
+        elif p.get("anexos_pendentes"):
+            # Imagens coladas valem para a mensagem em que foram coladas e a seguinte (resposta a um quiz/pergunta)
+            p["anexos_idade"] = p.get("anexos_idade", 0) + 1
+            if p["anexos_idade"] >= 2:
+                p["anexos_pendentes"] = []
+        p["mensagens"].append(user)
         p = self.store.save(p)
+        rapido = self.rota_rapida(p, text, bool(anexos))
+        if rapido is not None:
+            return rapido
+        return self.turno_ia(p)
+
+    # ------------------------------------------------------------------
+    # Turno de IA (Fase 2): sessão contínua por produção, só o que mudou, modelo com reserva, texto ao vivo
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _hash(valor) -> str:
+        return hashlib.sha256(json.dumps(valor, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+    @staticmethod
+    def resumo_mensagens(mensagens: list[dict]) -> list[dict]:
+        """Histórico enxuto para a IA: texto, anexos e o tipo dos cartões (sem listas de arquivos repetidas)."""
+        saida = []
+        for m in mensagens:
+            item = {"papel": m["papel"], "texto": m.get("texto", "")}
+            if m.get("anexos"):
+                item["anexos"] = [a["nome"] for a in m["anexos"]]
+            if m.get("blocos"):
+                item["cartoes"] = [b.get("tipo") + (f":{','.join(b.get('nomes') or [])}" if b.get("tipo") == "imagem" else "")
+                                   for b in m["blocos"]]
+            saida.append(item)
+        return saida
+
+    def _contexto(self, p: dict) -> tuple[dict, list[Path]]:
         context = {k: p.get(k) for k in ["nome", "master", "referencia", "duracao_final", "tomadas", "cortes", "faixa", "legenda", "cotacao", "status"]}
-        library = self.library()
-        instruction = (self.root / "studio" / "processo-prompt.md").read_text(encoding="utf-8")
         photos: list[Path] = []
         if p.get("master"):
             photos.append(self.asset(p["master"]))
         if p.get("referencia"):
-            # Reaproveita o extrator de quadros do sistema original; não envia o vídeo inteiro ao chat.
-            from studio.assistente import frames_do_video, montar_folha
+            # Reaproveita o extrator de quadros; refaz a folha só quando a referência muda (ffmpeg é lento).
             source = self.asset(p["referencia"])
-            meta = probe(source)
-            frames = frames_do_video(source, 0, min(30, meta["duracao"]), quantidade=12)
-            sheet = self.output(id) / "referencia-quadros.jpg"
-            montar_folha(frames, sheet, colunas=4, celula=240, numerar=True)
+            sheet = self.output(p["id"]) / "referencia-quadros.jpg"
+            marca = f"{p['referencia']['nome']}:{source.stat().st_size}:{int(source.stat().st_mtime)}"
+            if not sheet.exists() or p.get("referencia_folha") != marca:
+                from studio.assistente import frames_do_video, montar_folha
+                meta = probe(source)
+                frames = frames_do_video(source, 0, min(30, meta["duracao"]), quantidade=12)
+                montar_folha(frames, sheet, colunas=4, celula=240, numerar=True)
+                p["referencia_folha"] = marca
+                p["referencia_duracao"] = meta["duracao"]
             photos.append(sheet)
-            context["referencia_duracao"] = meta["duracao"]
-        prompt = instruction + "\n\nESTADO REAL:\n" + json.dumps(context, ensure_ascii=False) + "\nBIBLIOTECA REAL:\n" + json.dumps(library, ensure_ascii=False)
-        prompt += "\nCONVERSA RECENTE:\n" + json.dumps(p["mensagens"][-14:], ensure_ascii=False)
+            context["referencia_duracao"] = p.get("referencia_duracao")
+        if p.get("anexos_pendentes"):
+            context["anexos_colados"] = p["anexos_pendentes"]
+        return context, photos
+
+    def turno_ia(self, p: dict) -> dict:
+        id = p["id"]
+        context, fotos = self._contexto(p)
+        library = self.library()
+        instruction = (self.root / "studio" / "processo-prompt.md").read_text(encoding="utf-8")
+        anexos = [self.asset(a) for a in p.get("anexos_pendentes") or []]
+        user = p["mensagens"][-1]
+        ia = p.get("ia_sessao") or {}
+        h = {"instr": self._hash(instruction), "estado": self._hash(context), "lib": self._hash(library),
+             "fotos": self._hash([str(f) + str(f.stat().st_mtime) for f in fotos])}
+        geracao = ia.get("geracao", 0)
+        if not ia or ia.get("h_instr") != h["instr"]:
+            geracao += 1  # contrato novo (ou primeira vez): sessão nova no OpenClaw
+            ia = {}
+        completo = (instruction + "\n\nESTADO REAL:\n" + json.dumps(context, ensure_ascii=False)
+                    + "\nBIBLIOTECA REAL:\n" + json.dumps(library, ensure_ascii=False)
+                    + "\nCONVERSA RECENTE:\n" + json.dumps(self.resumo_mensagens(p["mensagens"][-14:]), ensure_ascii=False))
+        delta = None
+        imagens_delta: list[Path] = []
+        if ia.get("modelo"):
+            ids = [m["id"] for m in p["mensagens"]]
+            desde = ids.index(ia["ultima_msg"]) + 1 if ia.get("ultima_msg") in ids else max(0, len(ids) - 6)
+            entre = p["mensagens"][desde:-1]
+            partes = []
+            if entre:
+                partes.append("NO APLICATIVO, DESDE A SUA ÚLTIMA RESPOSTA:\n" + json.dumps(self.resumo_mensagens(entre), ensure_ascii=False))
+            if ia.get("h_estado") != h["estado"]:
+                partes.append("ESTADO ATUALIZADO:\n" + json.dumps(context, ensure_ascii=False))
+            if ia.get("h_lib") != h["lib"]:
+                partes.append("BIBLIOTECA ATUALIZADA:\n" + json.dumps(library, ensure_ascii=False))
+            if ia.get("h_fotos") != h["fotos"]:
+                imagens_delta += fotos
+                partes.append("Imagens de referência atualizadas anexadas (modelo aprovada e/ou folha de quadros).")
+            novos = [a for a, d in zip(anexos, p.get("anexos_pendentes") or []) if d["nome"] not in ia.get("anexos", [])]
+            if novos:
+                imagens_delta += novos
+                partes.append(f"{len(novos)} imagem(ns) colada(s) pelo Breno anexada(s) a esta mensagem.")
+            partes.append("MENSAGEM DO BRENO:\n" + json.dumps(self.resumo_mensagens([user])[0], ensure_ascii=False))
+            partes.append("Responda no mesmo contrato JSON (mensagem_pt primeiro).")
+            delta = "\n\n".join(partes)
+        sessao = f"prod-{id[:32]}-g{geracao}"
         try:
             from studio.assistente import extrair_json
-            response = extrair_json(self.ask(prompt, photos))
+            if self.conversar_ia:
+                self.rascunhos[id] = ""
+                r = self.conversar_ia({"sessao": sessao, "completo": completo, "delta": delta,
+                                       "imagensCompleto": [str(f) for f in fotos + anexos],
+                                       "imagensDelta": [str(f) for f in imagens_delta],
+                                       "modeloAnterior": ia.get("modelo") if ia.get("geracao") == geracao else None},
+                                      lambda texto, substituir: self._ao_delta(id, texto, substituir))
+                bruto, meta = r["texto"], {k: r.get(k) for k in ("modelo", "modo", "segundos", "usage")}
+                meta["tentativas"] = len(r.get("tentativas") or [])
+            else:  # modo antigo (sem sessão contínua)
+                bruto, meta = self.ask(completo, fotos + anexos), {"modo": "completo"}
+            meta["caracteres"] = len(delta if meta.get("modo") == "delta" else completo)
+            response = extrair_json(bruto)
             message = str(response.get("mensagem_pt", "")).strip()
             if not message:
                 raise ValueError("O OpenClaw não retornou uma mensagem.")
             if response.get("plano"):
                 p = self.save_plan(p, response["plano"], p["versao"])
             cards = self.cards(response.get("blocos", []), library)
-            p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "assistant", "texto": message,
-                                     "blocos": cards, "criado": agora()})
+            resposta = {"id": uuid.uuid4().hex, "papel": "assistant", "texto": message, "blocos": cards,
+                        "criado": agora(), "ia": meta}
+            p["mensagens"].append(resposta)
             p["erro"] = ""
+            # O que a IA já viu: o estado DEPOIS da resposta dela (o plano que ela mesma propôs não precisa voltar)
+            depois, _ = self._contexto(p)
+            p["ia_sessao"] = {"geracao": geracao, "modelo": meta.get("modelo") or "padrao", "h_instr": h["instr"],
+                              "h_estado": self._hash(depois), "h_lib": h["lib"], "h_fotos": h["fotos"],
+                              "ultima_msg": resposta["id"],
+                              "anexos": [a["nome"] for a in p.get("anexos_pendentes") or []]}
+            self.store.event(id, "turno_ia", meta)
             p = self.store.save(p)
             if response.get("acao") == "montar" and all(s.get("arquivo") for s in p["tomadas"]):
                 p = self.render(id)
+            elif response.get("acao") == "gerar_imagem" and isinstance(response.get("imagem"), dict):
+                pedido = response["imagem"]
+                destino = pedido.get("pasta") if pedido.get("pasta") in DESTINOS_IMAGEM else "cenarios"
+                usar_anexos = pedido.get("usar_anexos", True)
+                refs = (p.get("anexos_pendentes") or []) if usar_anexos else []
+                return self.pedir_imagem(p, destino, str(pedido.get("prompt", ""))[:1200], refs,
+                                         bool(pedido.get("usar_ellie")), aviso=False)
         except Exception as e:
-            p["erro"] = "Não consegui continuar pelo OpenClaw. Confira a conexão e a assinatura. " + str(e)[:300]
+            p["erro"] = "Não consegui continuar pelo OpenClaw. Confira a conexão e a assinatura.\n" + str(e).replace(" | ", "\n")[:1500]
             p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "assistant", "texto": p["erro"], "blocos": [{"tipo": "conexao"}], "criado": agora()})
+        finally:
+            self.rascunhos.pop(id, None)
+        return self.store.save(p)
+
+    def _ao_delta(self, id: str, texto: str, substituir: bool):
+        self.rascunhos[id] = texto if substituir else self.rascunhos.get(id, "") + texto
+
+    def rascunho(self, id: str) -> str:
+        """Só o texto de mensagem_pt que já chegou, extraído do JSON ainda incompleto."""
+        bruto = self.rascunhos.get(id, "")
+        achado = re.search(r'"mensagem_pt"\s*:\s*"((?:[^"\\]|\\.)*)', bruto)
+        if not achado:
+            return ""
+        parcial = achado.group(1)
+        if parcial.endswith("\\"):
+            parcial = parcial[:-1]
+        try:
+            return json.loads('"' + parcial + '"')
+        except ValueError:
+            return parcial.replace("\\n", "\n").replace('\\"', '"')
+
+    def responder(self, p: dict, texto: str, blocos: list | None = None) -> dict:
+        p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "assistant", "texto": texto,
+                               "blocos": blocos or [], "criado": agora(), "local": True})
+        p["erro"] = ""
+        return self.store.save(p)
+
+    def rota_rapida(self, p: dict, text: str, colou_agora: bool) -> dict | None:
+        """Resolve sem IA o que for óbvio: destino de imagem colada, variação da última imagem, ou quiz de 1 clique."""
+        pendentes = p.get("anexos_pendentes") or []
+        if pendentes:
+            destino = intencao_imagem(text) if text else None
+            if destino == "guardar":
+                p["anexos_pendentes"] = []
+                nomes = ", ".join(a["nome"] for a in pendentes)
+                return self.responder(p, f"Guardei na biblioteca, em anexos: {nomes}.")
+            if destino:
+                return self.pedir_imagem(p, destino, "" if text in OPCOES_IMAGEM else text, pendentes,
+                                         destino in ("base", "persona"))
+            if colou_agora and len(text) < 25:
+                return self.responder(p, "O que eu faço com essa imagem?", [{
+                    "tipo": "quiz", "titulo": "", "pergunta": "Escolha um caminho ou explique no chat.",
+                    "opcoes": list(OPCOES_IMAGEM)}])
+            return None  # tem pedido mais elaborado: a IA decide com a imagem anexada
+        ultimo = p.get("ultimo_pedido_imagem")
+        if ultimo and text and pede_variacao(text) and len(text) < 80:
+            refs = [a for a in ultimo.get("referencias", []) if self._existe(a)]
+            return self.pedir_imagem(p, ultimo["pasta"], ultimo.get("descricao", ""), refs, ultimo.get("usar_ellie", False))
+        return None
+
+    def _existe(self, a: dict) -> bool:
+        try:
+            self.asset(a)
+            return True
+        except (ValueError, Exception):
+            return False
+
+    def pedir_imagem(self, p: dict, pasta: str, descricao: str, refs: list[dict], usar_ellie: bool, aviso: bool = True) -> dict:
+        """Dispara a geração de imagem em segundo plano; o chat continua livre e mostra o resultado ao terminar."""
+        if not self.imagem:
+            return self.responder(p, "A geração de imagem não está ligada neste servidor.")
+        rotulo = {"cenarios": "o cenário", "pecas": "a roupa", "base": "a Ellie com essa roupa", "persona": "a imagem"}[pasta]
+        p["ultimo_pedido_imagem"] = {"pasta": pasta, "descricao": descricao, "referencias": refs, "usar_ellie": usar_ellie}
+        p["anexos_pendentes"] = []
+        if aviso:
+            p = self.responder(p, f"Gerando {rotulo} com o GPT Image. Leva de 30 s a 1,5 min; o resultado aparece aqui.")
+        else:
+            p = self.store.save(p)
+        self.background(p["id"], self._gerar_imagem, pasta, descricao, refs, usar_ellie, do_chat=True)
+        return {**self.store.get(p["id"]), "ocupado": True}
+
+    def _gerar_imagem(self, id: str, pasta: str, descricao: str, refs: list[dict], usar_ellie: bool):
+        caminhos = [self.asset(a) for a in refs]
+        try:
+            nome = self.imagem(pasta, descricao, "", caminhos, usar_ellie)
+        except Exception as e:
+            detalhe = getattr(e, "detail", None) or str(e)
+            p = self.store.get(id)
+            self.responder(p, f"A imagem não saiu: {str(detalhe)[:300]}. Peça de novo quando quiser.", [{"tipo": "conexao"}])
+            return
+        p = self.store.get(id)
+        self.store.event(id, "imagem_gerada", {"pasta": pasta, "nome": nome, "referencias": [a["nome"] for a in refs]})
+        # Só o que o próprio sistema gerou pode ser descartado (nunca a modelo aprovada ou arquivos do Breno)
+        p.setdefault("geradas", []).append({"pasta": pasta, "nome": nome})
+        self.responder(p, "Pronto. Se não ficou bom, peça outra versão ou descarte.",
+                       [{"tipo": "imagem", "titulo": "", "pasta": pasta, "nomes": [nome], "gerada": True}])
+
+    def descartar(self, id: str, asset: dict) -> dict:
+        """Tira um arquivo da biblioteca sem apagar: move para a pasta lixeira (dá pra recuperar).
+        Só vale para imagens que o sistema gerou ou que o Breno colou; nunca para a modelo aprovada."""
+        p = self.store.get(id)
+        if asset == p.get("master") or asset not in (p.get("geradas") or []) and asset["pasta"] != "anexos":
+            raise ValueError("Esse arquivo não foi gerado nesta conversa; não vou tirá-lo da biblioteca.")
+        path = self.asset(asset)
+        lixeira = self.root / "lixeira" / asset["pasta"]
+        lixeira.mkdir(parents=True, exist_ok=True)
+        destino = lixeira / path.name
+        if destino.exists():
+            destino = lixeira / f"{path.stem}-{uuid.uuid4().hex[:6]}{path.suffix}"
+        path.replace(destino)
+        p = self.store.get(id)
+        p["anexos_pendentes"] = [a for a in p.get("anexos_pendentes") or [] if a != asset]
+        for m in p["mensagens"]:
+            for b in m.get("blocos") or []:
+                if b.get("tipo") == "imagem" and b.get("pasta") == asset["pasta"] and asset["nome"] in (b.get("nomes") or []):
+                    b["descartado"] = True
+            if asset in (m.get("anexos") or []):
+                m["anexos"] = [a for a in m["anexos"] if a != asset]
+        self.store.event(id, "descartado", asset)
         return self.store.save(p)
 
     def chat(self, id: str, request: Mensagem) -> dict:
@@ -279,10 +552,17 @@ class Processo:
         cards = []
         for item in values[:4]:
             kind = item.get("tipo")
-            if kind not in ("galeria", "quiz", "plano", "custo", "resultado", "upload", "edicao"):
+            if kind not in ("galeria", "quiz", "plano", "custo", "resultado", "upload", "edicao", "imagem"):
                 continue
             card = {"tipo": kind, "titulo": str(item.get("titulo", ""))[:150]}
-            if kind in ("galeria", "upload"):
+            if kind == "imagem":
+                folder = item.get("pasta")
+                if folder not in PASTAS:
+                    continue
+                card.update(pasta=folder, nomes=[n for n in item.get("nomes", []) if n in library[folder]][:8])
+                if not card["nomes"]:
+                    continue
+            elif kind in ("galeria", "upload"):
                 folder = item.get("pasta", "movimentos")
                 if folder not in PASTAS:
                     continue
@@ -331,8 +611,9 @@ class Processo:
         def imported(path: Path, media: str) -> str:
             kind = "external_generated" if media == "image" else "local_upload"
             key = sha256(path)
-            item = p["imports"].setdefault(key, {"resource": str(uuid.uuid4()), "submit": str(uuid.uuid4()),
-                                                  "node": "node_" + uuid.uuid4().hex[:12]})
+            item = p["imports"].setdefault(key, {"resource": str(uuid.uuid4()), "submit": str(uuid.uuid4())})
+            if not item.get("imported"):
+                item.pop("node", None)  # IDs inventados por versões antigas eram recusados pela CLI
             self.store.save(p)
             if not item.get("uploaded"):
                 result = self.cli.upload(path, p["canvas_id"], item["resource"], kind)
@@ -341,7 +622,10 @@ class Processo:
                 item["uploaded"] = True
                 self.store.save(p)
             if not item.get("imported"):
-                self.cli.import_node(media, item["resource"], item["node"], p["canvas_id"], item["submit"], path.stem, kind)
+                criado = self.cli.import_node(media, item["resource"], None, p["canvas_id"], item["submit"], path.stem, kind)
+                item["node"] = Dreamina.node_id(criado)
+                if not item["node"]:
+                    raise ValueError("A CLI criou a referência mas não devolveu o node_id. Resposta: " + json.dumps(criado)[:300])
                 item["imported"] = True
                 self.store.save(p)
             return item["node"]
@@ -355,9 +639,14 @@ class Processo:
                 target = self.output(id) / f"movimento-{shot['id']}.mp4"
                 preparar_referencia(source, target, shot["movimento_inicio"], shot["movimento_duracao"])
                 refs.append(imported(target, "video"))
-            shot.setdefault("node_id", "node_" + uuid.uuid4().hex[:12])
-            self.store.save(p)
-            self.cli.draft(shot, p["canvas_id"], refs)
+            if not shot.get("node_id_cli"):
+                shot.pop("node_id", None)  # sem ID: a CLI cria; com ID dela, atualiza o mesmo rascunho
+            criado = self.cli.draft(shot, p["canvas_id"], refs)
+            if not shot.get("node_id_cli"):
+                shot["node_id"] = Dreamina.node_id(criado)
+                if not shot["node_id"]:
+                    raise ValueError("A CLI criou a tomada mas não devolveu o node_id. Resposta: " + json.dumps(criado)[:300])
+                shot["node_id_cli"] = True
             shot["estado"] = "rascunho"
             self.store.save(p)
         quote = self.cli.quote(p["canvas_id"], [s["node_id"] for s in pending])
@@ -412,6 +701,8 @@ class Processo:
         p = self.store.get(id)
         if p.get("status") == "concluido" and p.get("resultado") and all(s.get("arquivo") for s in p["tomadas"]):
             return p
+        prontas_antes = {s["id"] for s in p["tomadas"] if s.get("arquivo")}
+        falhas_antes = {s["id"] for s in p["tomadas"] if s.get("estado") in ("failed", "canceled", "cancelled")}
         for shot in p["tomadas"]:
             if not shot.get("submit_id") or shot.get("arquivo"):
                 continue
@@ -440,6 +731,7 @@ class Processo:
                 shot.update(arquivo={"pasta": "saida", "nome": filename}, sha256=sha256(dest), estado="baixado", info=data)
                 p["erro"] = ""
             self.store.save(p)
+        self._avisar_tomadas(p, prontas_antes, falhas_antes)
         if all(s.get("arquivo") for s in p["tomadas"]):
             p["status"] = "pronto_para_montar"
             self.store.save(p)
@@ -450,6 +742,24 @@ class Processo:
         elif not any(s.get("submit_id") and not s.get("arquivo") for s in p["tomadas"]):
             p["status"] = "proxima_tomada"
         return self.store.save(p)
+
+    def _avisar_tomadas(self, p: dict, prontas_antes: set, falhas_antes: set):
+        """Avisa no chat, sem IA, quando uma tomada fica pronta ou falha, com o cartão de produção atualizado."""
+        novas = [s for s in p["tomadas"] if s.get("arquivo") and s["id"] not in prontas_antes]
+        falhas = [s for s in p["tomadas"] if s.get("estado") in ("failed", "canceled", "cancelled") and s["id"] not in falhas_antes]
+        if not novas and not falhas:
+            return
+        faltam = [s["titulo"] for s in p["tomadas"] if not s.get("arquivo")]
+        partes = []
+        for s in novas:
+            gasto = f", {s['creditos_registrados']} créditos" if isinstance(s.get("creditos_registrados"), (int, float)) else ""
+            partes.append(f"A tomada \"{s['titulo']}\" ficou pronta ({s.get('info', {}).get('duracao', s['duracao']):.0f}s{gasto}). Assista abaixo antes de seguir.")
+        for s in falhas:
+            partes.append(f"A tomada \"{s['titulo']}\" não concluiu no Dreamina. Nada foi repetido; os custos conhecidos ficaram registrados.")
+        partes.append(("Falta: " + ", ".join(faltam) + ".") if faltam else "Todas as tomadas estão prontas; vou montar o vídeo.")
+        p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "assistant", "texto": " ".join(partes),
+                               "blocos": [{"tipo": "custo", "titulo": "Produção das tomadas"}], "criado": agora(), "local": True})
+        self.store.save(p)
 
     def reuse(self, p: dict, id: str, asset: dict) -> dict:
         path = self.asset(asset)
@@ -500,9 +810,10 @@ class Processo:
         self.store.event(id, "montagem_local", {"arquivo": result["nome"] if "nome" in result else Path(result["caminho"]).name, "creditos": 0})
         return self.store.save(p)
 
-    def background(self, id: str, function, *args):
+    def background(self, id: str, function, *args, do_chat: bool = False):
         with self.lock:
-            if id in self.busy or id in self.chatting:
+            # do_chat: disparado de dentro do próprio turno de conversa (que ainda segura self.chatting)
+            if id in self.busy or (id in self.chatting and not do_chat):
                 raise ValueError("Esta produção já está processando uma operação.")
             self.busy.add(id)
         def work():
@@ -519,8 +830,8 @@ class Processo:
         return {"iniciado": True, "id": id}
 
 
-def create_router(root: Path, ask) -> APIRouter:
-    service = Processo(root, ask)
+def create_router(root: Path, ask, imagem=None, conversar=None) -> APIRouter:
+    service = Processo(root, ask, imagem=imagem, conversar=conversar)
     router = APIRouter(prefix="/api/processo")
     router.service = service
 
@@ -576,6 +887,21 @@ def create_router(root: Path, ask) -> APIRouter:
             dest.unlink(missing_ok=True)
             raise HTTPException(400, str(e)) from None
         return {"pasta": pasta, "nome": dest.name}
+
+    @router.get("/ocupado")
+    def busy():
+        """Usado pelo supervisor: só reinicia o servidor quando nada está em andamento."""
+        return {"ocupado": bool(service.busy or service.chatting),
+                "operacoes": sorted(service.busy | set(service.chatting))}
+
+    @router.get("/{id}/rascunho")
+    def draft(id: str):
+        return {"texto": service.rascunho(id), "pensando": id in service.chatting}
+
+    @router.post("/{id}/descartar")
+    def discard(id: str, request: Descartar):
+        get(id)
+        return safe(service.descartar, id, request.asset.model_dump())
 
     @router.get("")
     def list_productions():

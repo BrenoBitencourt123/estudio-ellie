@@ -37,6 +37,19 @@ Conclua o fluxo no navegador e deixe o comando terminar. Confira o modelo, a aut
 
 Verifique `openclaw gateway status`. Se já estiver instalado como serviço, mantenha esse serviço aberto; se estiver no assistente em primeiro plano, preserve o terminal em execução. A instalação como serviço é uma etapa separada do OpenClaw.
 
+### Claude + GPT juntos (chat com reserva automática)
+
+Um agente do OpenClaw por modelo. Cada agente guarda o próprio modelo e o próprio login: `ellie-claude` (Claude pelo Claude CLI) e `ellie-studio` (GPT pelo Codex, que também gera as imagens). A ponte não força modelo por sessão: em 18/10/2026, com OpenClaw 2026.10.4, `sessions.patch` com `model` desligou o runtime do agente (Codex: "A runtime is not available"; Claude: caiu no provedor por API e pediu chave). O prefixo `claude-cli/` citado na documentação mais nova não existe nessa versão ("Unknown provider").
+
+1. `claude auth login` (CLI do Claude Code logada na sua assinatura).
+2. Criar o agente com o modelo do Claude, com o Gateway aberto (Node 24+, por exemplo o do Codex):
+   `node studio/mcp/configurar-gateway.mjs ellie-claude anthropic/claude-opus-5-5`
+3. Ligar o login do Claude CLI nesse agente: `openclaw models auth login --provider anthropic --method cli --agent ellie-claude`
+4. Conferir: `openclaw models status --agent ellie-claude` (padrão Claude, sem perfil api-key, sem fallbacks).
+5. No `.env`: `OPENCLAW_AGENTE_CHAT=ellie-claude` e `OPENCLAW_AGENTE_RESERVA=ellie-studio`. O supervisor aplica sozinho.
+
+Cada produção tem uma sessão por agente. A primeira mensagem leva contrato e contexto completos; as seguintes, só o que mudou. Se o principal falhar, o próximo agente recebe o contexto completo. Estourar o tempo não dispara a reserva. Cada resposta mostra agente, modo, tokens e tempo.
+
 ### VPS, outro computador ou WSL
 
 Configure e autentique o agente no ambiente que executa o Gateway. O script Python deste pacote usa o workspace local; não registre um caminho Windows como se ele existisse numa VPS Linux. Copie o workspace do agente para o host correto e registre esse caminho pela CLI oficial de lá.

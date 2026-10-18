@@ -30,6 +30,8 @@ movimentos/*
 exemplos/producao-v7.json
 docs/previa-*.png
 movimentos/.limpos/
+anexos/
+lixeira/
 studio/agente-ellie/.openclaw-cli-images/
 studio/agente-ellie/media/
 studio/agente-ellie/skills/
