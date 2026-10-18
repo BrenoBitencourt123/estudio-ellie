@@ -32,6 +32,10 @@ docs/previa-*.png
 movimentos/.limpos/
 studio/agente-ellie/.openclaw-cli-images/
 studio/agente-ellie/media/
+studio/agente-ellie/skills/
+studio/agente-ellie/memory/
+studio/agente-ellie/MEMORY.md
+studio/agente-ellie/.openclaw/
 
 # Dependências e build
 studio/web/node_modules/

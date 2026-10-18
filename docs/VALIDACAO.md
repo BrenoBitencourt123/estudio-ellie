@@ -20,3 +20,15 @@
 - Ferramenta de imagem integrada ao host OpenClaw. Sem ela, o caminho implementado é prompt + anexar o resultado do chat. Não há fallback para comprar imagem no Dreamina.
 
 A entrega contém um exemplo local pronto para exercitar referências, edição e download antes de configurar as contas. Não tratar esse exemplo como demonstração de que o plano novo de duas tomadas já foi gerado com sucesso.
+
+## Conexão real confirmada — 18/10/2026
+
+- OAuth Codex confirmado no OpenClaw; nenhum fallback de chave de API foi adicionado.
+- Gateway local ativo, restrito a loopback, e agente `ellie-studio` registrado no workspace deste projeto pelo RPC oficial `agents.create`.
+- A mesma ponte usada pelo Estúdio retornou `ELLIE_CONNECTED` em uma chamada real. A primeira resposta levou aproximadamente 230 segundos durante a inicialização nativa.
+- Uma conversa real pelo aplicativo foi salva com duas mensagens, resposta em português e nenhum erro. A segunda resposta observada levou aproximadamente 74 segundos. Não foram executadas gerações de vídeo.
+- Limite de espera ampliado para dez minutos e erro de timeout distinguido de serviço desligado; texto final aceita tanto string quanto blocos. Os 21 testes de processo passaram novamente após o ajuste.
+- `gateway auth-token --show` foi executado sem expor o token na documentação. O diagnóstico geral `doctor --generate-gateway-token --non-interactive` foi interrompido após ficar bloqueado; não é apresentado como diagnóstico concluído. O token existente e a comunicação com o Gateway foram preservados.
+- Código enviado ao repositório privado `BrenoBitencourt123/estudio-ellie`, sem credenciais, conversas, mídias pessoais ou dependências instaladas.
+
+A conexão confirmada é a deste ambiente. O projeto clonado precisa das contas e dos serviços locais configurados pelo proprietário. Nenhuma geração paga foi adicionada à validação.

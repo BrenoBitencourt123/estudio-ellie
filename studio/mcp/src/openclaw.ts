@@ -41,7 +41,7 @@ function aoEvento(frame: Frame): void {
   if (!espera || !p.state || !["final", "error", "aborted"].includes(p.state)) return;
   esperas.delete(p.sessionKey!);
   clearTimeout(espera.timer);
-  if (p.state === "final") espera.resolver((p.message?.content ?? []).map((c) => c.text ?? "").join(""));
+  if (p.state === "final") espera.resolver(textosDaMensagem(p.message ?? {}).join(""));
   else espera.rejeitar(new Error(p.errorMessage ?? "O OpenClaw não concluiu a resposta."));
 }
 
@@ -107,7 +107,7 @@ function anexo(caminho: string) {
 }
 
 // Manda um pedido (com imagens) ao agente e devolve o texto final da resposta
-export async function perguntar(texto: string, imagens: string[] = [], tempoMaximoMs = 180_000): Promise<string> {
+export async function perguntar(texto: string, imagens: string[] = [], tempoMaximoMs = 600_000): Promise<string> {
   const anexos = imagens.map(anexo);
   await conectar();
   const sessionKey = `agent:${AGENTE}:estudio-${Date.now()}-${randomUUID().slice(0, 8)}`;

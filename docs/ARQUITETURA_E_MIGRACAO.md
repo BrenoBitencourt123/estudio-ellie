@@ -83,3 +83,5 @@ A ponte e o transporte MCP foram testados; o Gateway com a assinatura do usuári
 Imagens integradas ao chat continuam dependendo da ferramenta disponível no host. Aqui o caminho implementado é receber a imagem criada no chat pela biblioteca. Não foi criada uma API escondida para reproduzir a ferramenta integrada do ChatGPT a partir do OpenClaw.
 
 O exemplo contém fontes já prontas e permite verificar a edição sem esses acessos. A qualidade de um próximo vídeo só pode ser conhecida depois de gerá-lo; não há garantia de transferência exata de coreografia ou viralização.
+
+Atualização da conexão: em 18/10/2026, o login OAuth Codex e a resposta real pelo agente `ellie-studio` foram confirmados neste PC. Uma conversa do aplicativo também foi persistida sem erro. O registro foi feito por RPC oficial com permissão administrativa pontual; a ponte diária continua com leitura/escrita. Consulte `VALIDACAO.md` para tempos observados e limites. As credenciais continuam fora do pacote e do GitHub.

@@ -12,9 +12,11 @@ No Windows, siga o [instalador oficial](https://docs.openclaw.ai/start/getting-s
 
 ### OpenClaw neste computador
 
-Neste computador, a instalação nativa foi concluída em 18/10/2026 e `--version` retornou **OpenClaw 2026.10.4 (383c124)**. Login ainda não concluído. Isso é o estado deste teste, não uma dependência fixada do pacote.
+Neste computador, a instalação nativa foi concluída em 18/10/2026 e `--version` retornou **OpenClaw 2026.10.4 (383c124)**. Depois do login do proprietário, o OpenClaw confirmou OAuth utilizável na rota Codex, o Gateway respondeu e `ellie-studio` foi registrado. Um teste pela ponte real retornou `ELLIE_CONNECTED`. Isso registra este ambiente, não fixa uma conta ou versão dentro do pacote.
 
-Use **abrir-openclaw.bat** para abrir o assistente clássico e escolher sua assinatura. O atalho usa `openclaw-local.ps1`, que encontra um Node compatível no PATH ou no runtime local do Codex; não altera o Node global. Em outro PC, instale Node 24.16+ ou 26.1+ e OpenClaw oficialmente. O wrapper espera a instalação npm do usuário; instalações em outro local devem usar sua CLI diretamente.
+A inicialização nativa foi lenta neste primeiro teste: o Gateway levou cerca de seis minutos para carregar os plugins e a primeira conversa ultrapassou o limite antigo de três minutos. O Estúdio agora aguarda até dez minutos e distingue demora de serviço desligado. Isso não promete esse tempo em outros computadores. Consultas de configuração, importação e diagnóstico do OpenClaw devem ser executadas em sequência; o registro por RPC evita repetir carregamentos completos da CLI enquanto o Gateway já está aberto.
+
+Use **abrir-openclaw.bat**: com uma configuração existente, ele abre o painel oficial; na primeira configuração, abre o assistente clássico. Não repete a importação do Codex a cada abertura. O atalho usa `openclaw-local.ps1`, que encontra um Node compatível no PATH ou no runtime local do Codex; não altera o Node global. Em outro PC, instale Node 24.16+ ou 26.1+ e OpenClaw oficialmente. O wrapper espera a instalação npm do usuário; instalações em outro local devem usar sua CLI diretamente.
 
 Para os comandos abaixo, se `openclaw` não funcionar no seu terminal por causa do Node antigo, substitua-o por `./openclaw-local.cmd` na pasta do projeto.
 
@@ -22,6 +24,8 @@ Para os comandos abaixo, se `openclaw` não funcionar no seu terminal por causa 
 2. Selecione um modelo realmente disponível para essa conta. Não copie identificadores antigos do sistema original nem configure API-key/fallback pago para contornar o limite.
 3. Confira `openclaw agents list`. O script `configurar_openclaw.py` apenas prepara/registra `ellie-studio` com o workspace deste pacote e copia sua skill. Ele deixa a autenticação e a seleção de modelo sob controle do OpenClaw.
 4. Com o Gateway aberto, inicie o Estúdio. A indicação de conexão depende de `agents.list` retornar o agente correto. “Ponte aberta” e “assinatura autenticada” são estados diferentes.
+
+Se o Gateway já estiver aberto, `python configurar_openclaw.py --executar --gateway` usa o cliente oficial e o RPC `agents.create` para registrar somente `ellie-studio`. Ele confere a existência antes de criar, preserva outro workspace e não copia contas. A permissão administrativa é usada apenas nessa configuração pontual; o chat diário mantém somente leitura/escrita. Uma skill local idêntica pode ser reaproveitada; uma skill alterada é preservada.
 
 Depois de registrar o agente, confira `openclaw models status --agent ellie-studio`. Se faltar autenticação ChatGPT nesse agente, execute no computador do Gateway:
 
@@ -41,7 +45,7 @@ A ponte precisa alcançar esse Gateway e receber a credencial por configuração
 
 ## Futuro repositório GitHub
 
-O `.gitignore` exclui contas, configurações de autenticação, conversas/SQLite, logs, referências pessoais e vídeos. O ZIP de demonstração inclui mídias escolhidas para uso local; isso não significa que elas devam ser publicadas no GitHub. Confira os arquivos preparados para o primeiro commit. Nenhum repositório foi criado ou enviado por esta entrega.
+O código foi enviado, por pedido do usuário, para o repositório privado [BrenoBitencourt123/estudio-ellie](https://github.com/BrenoBitencourt123/estudio-ellie). O `.gitignore` exclui contas, configurações de autenticação, conversas/SQLite, logs, referências pessoais e vídeos. O primeiro envio continha 92 arquivos de código/documentação e nenhum arquivo de mídia ou credencial detectada na conferência. O ZIP de demonstração inclui mídias escolhidas para uso local; elas não fazem parte do repositório.
 
 O nome do agente é configurável em `.env` por `OPENCLAW_AGENTE`. `OPENCLAW_URL` aponta para o Gateway local. O token do Gateway pode ser resolvido da configuração local ou de `OPENCLAW_GATEWAY_TOKEN`, sem ser persistido pelo Estúdio.
 

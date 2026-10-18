@@ -409,14 +409,16 @@ def estimar(p: PedidoVideo):
 # Assistente de prompt (IA escreve a cena a partir da sua ideia e das referências)
 # ---------------------------------------------------------------------------
 
-def perguntar_ia(texto: str, imagens: list[Path], tempo_maximo_s: int = 180) -> str:
-    """Pergunta ao agente "ellie" do OpenClaw (pela ponte em studio/mcp) e devolve o texto da resposta."""
+def perguntar_ia(texto: str, imagens: list[Path], tempo_maximo_s: int = 600) -> str:
+    """Pergunta ao agente do Estúdio pela ponte OpenClaw e devolve o texto da resposta."""
     try:
         r = requests.post(
             f"{URL_IA}/ia/perguntar",
             json={"texto": texto, "imagens": [str(i) for i in imagens], "tempo_maximo_s": tempo_maximo_s},
             timeout=tempo_maximo_s + 20,
         )
+    except requests.Timeout:
+        raise RuntimeError("O OpenClaw excedeu o tempo de resposta. A conversa foi preservada; confira o Gateway antes de enviar novamente.")
     except requests.RequestException:
         raise RuntimeError("O serviço de IA do Estúdio (janela 'Estudio Ellie - MCP') não está aberto.")
     dados = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
