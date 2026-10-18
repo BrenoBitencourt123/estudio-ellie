@@ -1,0 +1,19 @@
+{
+  "name": "estudio-ellie-mcp",
+  "private": true,
+  "type": "module",
+  "description": "Servidor MCP do Estúdio Ellie: um agente de IA vê as referências, escreve a cena e deixa rascunhos de vídeo. Gerar é sempre clique humano.",
+  "scripts": {
+    "start": "node src/index.ts",
+    "stdio": "node src/index.ts --stdio"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@openclaw/gateway-client": "^2026.8.1",
+    "@openclaw/gateway-protocol": "^2026.8.1",
+    "zod": "^4.6.5"
+  }
+}

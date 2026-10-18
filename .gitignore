@@ -1,0 +1,46 @@
+# Credenciais e configuração de contas
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+auth-profiles*
+openclaw.json
+.openclaw/
+.codex/
+.claude/
+
+# Dados e vídeos de cada usuário
+saida/*
+!saida/.gitkeep
+studio/dados/
+*.sqlite*
+*.db
+*.log
+persona/*
+!persona/.gitkeep
+base/*
+!base/.gitkeep
+pecas/*
+!pecas/.gitkeep
+cenarios/*
+!cenarios/.gitkeep
+movimentos/*
+!movimentos/.gitkeep
+exemplos/producao-v7.json
+docs/previa-*.png
+movimentos/.limpos/
+studio/agente-ellie/.openclaw-cli-images/
+studio/agente-ellie/media/
+
+# Dependências e build
+studio/web/node_modules/
+studio/web/dist/
+studio/mcp/node_modules/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+test-results/
+tests/.temporarios/
+MANIFESTO_MUDANCAS.json
