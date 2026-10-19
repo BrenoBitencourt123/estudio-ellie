@@ -12,12 +12,23 @@ async function request<T>(path: string, method = 'GET', body?: unknown, human = 
 export const processo = {
   listar: () => request<Producao[]>(''),
   criar: (nome: string) => request<Producao>('', 'POST', { nome }),
+  narracaoStatus: () => request<{ elevenlabs: boolean; voz_padrao: string }>('/narracao/status'),
+  gerarVoz: (id: string, dados: { texto: string; voz: string; setas: boolean; cta?: string }) => request(`/${id}/narracao`, 'POST', dados),
+  enviarAudio: async (id: string, file: File, texto: string, setas: boolean) => {
+    const body = new FormData(); body.append('arquivo', file); body.append('texto', texto); body.append('setas', String(setas))
+    const r = await fetch(`/api/processo/${id}/narracao/arquivo`, { method: 'POST', body })
+    const value = await r.json()
+    if (!r.ok) throw new Error(value.detail ?? 'O áudio não foi enviado.')
+    return value
+  },
   obter: (id: string) => request<Producao>(`/${id}`),
   biblioteca: () => request<Biblioteca>('/biblioteca'),
   modelos: () => request<ModeloVideo[]>('/modelos'),
+  painelOpenclaw: () => request<{ url: string; aviso?: string }>('/openclaw/painel', 'POST'),
   status: () => request<{ dreamina: { conectado: boolean; instalada: boolean; erro?: string }; planejamento: string }>('/status'),
   conversar: (id: string, texto: string, selecao?: Selecao, anexos: Midia[] = []) => request<Producao>(`/${id}/conversa`, 'POST', { texto, selecao, anexos }),
   rascunho: (id: string) => request<{ texto: string; pensando: boolean }>(`/${id}/rascunho`),
+  usarImagem: (id: string, asset: Midia, como: 'quadro' | 'recriar') => request<Producao>(`/${id}/usar-imagem`, 'POST', { asset, como }),
   descartar: (id: string, asset: Midia) => request<Producao>(`/${id}/descartar`, 'POST', { asset }),
   salvar: (p: Producao, plano: PlanoProducao) => request<Producao>(`/${p.id}/plano`, 'PUT', { versao: p.versao, plano }),
   cotar: (id: string, tomadas?: string[]) => request<{ iniciado: boolean }>(`/${id}/cotar`, 'POST', { tomadas }),
@@ -35,6 +46,7 @@ export const processo = {
 }
 export const urlMidia = (pasta: string, nome: string) => `/api/processo/arquivo/${encodeURIComponent(pasta)}/${encodeURIComponent(nome)}`
 export const urlResultado = (id: string) => `/api/processo/${id}/resultado`
+export const urlNarracao = (id: string, audio: string) => `/api/processo/${id}/narracao/audio?v=${encodeURIComponent(audio)}`
 export const planoDe = (p: Producao): PlanoProducao => ({
-  duracao_final: p.duracao_final, tomadas: p.tomadas, cortes: p.cortes, faixa: p.faixa, legenda: p.legenda,
+  layout: p.layout, duracao_final: p.duracao_final, tomadas: p.tomadas, cortes: p.cortes, faixa: p.faixa, legenda: p.legenda,
 })

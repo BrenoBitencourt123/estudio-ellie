@@ -6,7 +6,7 @@ import PlanoConversa from '@/components/PlanoConversa'
 import ConversaModal from '@/components/ConversaModal'
 import { useConversa } from '@/hooks/useConversa'
 import { useAnexos } from '@/hooks/useAnexos'
-import { urlMidia } from '@/lib/processo'
+import { processo, urlMidia } from '@/lib/processo'
 import type { Bloco, MensagemChat, UsoIA } from '@/types/processo'
 import './conversa.css'
 
@@ -46,7 +46,33 @@ function Cronometro({ desde }: { desde: number }) {
 
 export default function App() {
   const chat = useConversa()
-  const colados = useAnexos()
+  const [avisoAudio, setAvisoAudio] = useState('')
+  // Áudio arrastado/colado vira a narração do vídeo (sincroniza a legenda com o texto do roteiro)
+  const colados = useAnexos(file => {
+    const atual = chat.producao
+    if (!atual) { setAvisoAudio('Comece a conversa do vídeo antes de enviar o áudio da narração.'); return }
+    setAvisoAudio('Enviando e sincronizando o áudio…')
+    void processo.enviarAudio(atual.id, file, atual.narracao?.texto ?? '', atual.narracao?.setas ?? true)
+      .then(() => { setAvisoAudio(''); void chat.atualizar() })
+      .catch(e => setAvisoAudio(e instanceof Error ? e.message : 'O áudio não foi enviado.'))
+  })
+  const [abrindoPainel, setAbrindoPainel] = useState(false)
+  // Abre a aba já no clique (senão o navegador bloqueia o pop-up) e depois aponta para o link de uso único do OpenClaw
+  const abrirPainel = async () => {
+    const aba = window.open('', '_blank')
+    if (aba) aba.document.write('<p style="font:16px system-ui;padding:24px">Abrindo o painel do OpenClaw…</p>')
+    setAbrindoPainel(true); setAvisoAudio('Abrindo o painel do OpenClaw…')
+    try {
+      const { url, aviso } = await processo.painelOpenclaw()
+      if (aba && !aba.closed) aba.location.replace(url); else window.open(url, '_blank')
+      setAvisoAudio(aviso ?? '')
+    } catch (e) {
+      // Mesmo se o Estúdio falhar, tenta o endereço padrão do painel em vez de deixar a aba vazia
+      if (aba && !aba.closed) aba.location.replace('http://127.0.0.1:18789/')
+      setAvisoAudio(e instanceof Error ? e.message : 'O painel do OpenClaw não abriu.')
+    }
+    finally { setAbrindoPainel(false) }
+  }
   const [arrastando, setArrastando] = useState(false)
   const arquivo = useRef<HTMLInputElement>(null)
   // O texto digitado sobrevive a uma recarga automática (atualização do sistema)
@@ -88,7 +114,7 @@ export default function App() {
     return () => clearInterval(timer)
   }, [])
   const podeEnviar = (!!texto.trim() || colados.prontos.length > 0) && !colados.enviando && !chat.pensando && !p?.ocupado
-  const refs = [p?.master, p?.referencia].filter(a => !!a)
+  const refs = [p?.master, p?.referencia, ...(p?.tomadas ?? []).map(s => s.imagens[0]).filter(a => a && a.pasta !== 'base')].filter(a => !!a).slice(0, 4)
   const card = (block: Bloco, key: string) => p && <CartaoProducao key={key} bloco={block} producao={p} abrir={abrir}
     responder={value => void enviar(value)} atualizar={chat.atualizar} />
   return <div className="studio-chat">
@@ -106,13 +132,14 @@ export default function App() {
     <main className="conversation-main">
       <header className="chat-header"><div><span className="eyebrow">PRODUÇÃO EM CONVERSA</span><h1>{p?.nome ?? 'O que vamos criar hoje?'}</h1></div>
         <div className="header-actions"><button className="secondary-button" onClick={() => setConectar(true)}>{chat.ia ? 'OpenClaw ✓' : 'Conectar IA'}</button>
+        <button className="secondary-button" disabled={abrindoPainel} title="Conectores, agentes e sessões do OpenClaw" onClick={() => void abrirPainel()}>{abrindoPainel ? 'Abrindo…' : 'Painel OpenClaw ↗'}</button>
         <button className="secondary-button" onClick={() => setModal({ tipo: 'galeria', titulo: 'Sua biblioteca', pasta: 'movimentos' })}>Biblioteca ↗</button></div></header>
       <div className="chat-layout"><section className="chat-column" aria-label="Chat com a diretora de produção">
         <div className="chat-feed" aria-busy={chat.pensando || chat.carregando}>
           {chat.carregando && <p className="loading-message">Abrindo suas conversas…</p>}
           {!chat.carregando && !p?.mensagens.length && <div className="chat-welcome"><span className="eyebrow">COMECE PELA IDEIA</span>
             <h2>Você imagina.<br /><em>A gente constrói.</em></h2><p>Me conte o vídeo que quer fazer. Quando precisar de uma referência ou de uma escolha sua, eu mostro aqui.</p>
-            <div className="starter-prompts">{['Quero transformar um look de verão em outono.', 'Tenho uma referência de movimento para usar.', 'Quero mudar o texto de um vídeo pronto.'].map(value =>
+            <div className="starter-prompts">{['Tenho uma ideia de vídeo, me ajuda a montar.', 'Me sugere 3 ideias diferentes das últimas que fizemos.', 'Vou colar uma imagem de referência para a cena.'].map(value =>
               <button key={value} onClick={() => void enviar(value)}>{value} <span>↗</span></button>)}</div></div>}
           {p?.mensagens.map((message, i) => <article className={`chat-message ${message.papel}`} key={message.id}>
             <span className="message-author">{message.papel === 'user' ? 'Você' : 'Direção Ellie'}<time className="message-time">{hora(message.criado)}{tempoResposta(p.mensagens, i)}</time></span>{message.texto && <p>{message.texto}</p>}
@@ -126,6 +153,7 @@ export default function App() {
           {p?.ocupado && <p className="thinking-message" role="status">Processando sua produção. Pode acompanhar por aqui.</p>}
           {p?.erro && !chat.pensando && <p className="error-message" role="alert">{p.erro}</p>}
           {chat.erro && <p className="error-message" role="alert">{chat.erro}</p>}
+          {avisoAudio && <p className="thinking-message" role="status">{avisoAudio}</p>}
           {painel && card(painel, 'painel-atual')}
           {p?.resultado && card({ tipo: 'resultado', titulo: 'Seu vídeo' }, `resultado-${p.resultado.nome}`)}
           <div ref={fim} />
@@ -133,20 +161,22 @@ export default function App() {
         <div className="composer-wrap">
           {p && <nav className="context-actions" aria-label="Controles da conversa">
             <button onClick={() => setModal({ tipo: 'galeria', titulo: 'Escolher referência', pasta: 'movimentos' })}>+ Referência</button>
+            <button onClick={() => abrir({ tipo: 'narracao', titulo: 'Narração' })}>Narração</button>
+            <button onClick={() => { setTexto('busca no pinterest '); input.current?.focus() }}>Pinterest</button>
             <button onClick={() => abrir({ tipo: 'plano' })}>Estrutura</button><button onClick={() => abrir({ tipo: 'custo', titulo: 'Orçamento da produção' })}>Custo e geração</button>
             <button onClick={() => { setPainel({ tipo: 'edicao', titulo: 'Montagem local' }); abrir({ tipo: 'edicao' }) }}>Texto e montagem</button></nav>}
           {!!colados.anexos.length && <div className="attachment-chips" aria-label="Imagens coladas">{colados.anexos.map(a =>
             <div className={`attachment-chip ${a.erro ? 'failed' : a.asset ? '' : 'uploading'}`} key={a.id} title={a.erro ?? a.asset?.nome ?? 'Enviando…'}>
               <img src={a.url} alt="" /><button type="button" aria-label="Remover imagem" onClick={() => colados.remover(a.id)}>×</button></div>)}
-            <small>{colados.enviando ? 'Subindo…' : 'Diga o que fazer (cenário, roupa, Ellie com a roupa) ou só envie.'}</small></div>}
+            <small>{colados.enviando ? 'Subindo…' : 'Diga o que fazer com a imagem (quadro, cenário, roupa…) ou só envie.'}</small></div>}
           <form className={`chat-composer ${arrastando ? 'dragging' : ''}`} onSubmit={e => { e.preventDefault(); void enviar(texto) }}
             onDragOver={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setArrastando(true) } }}
             onDragLeave={() => setArrastando(false)}
             onDrop={e => { e.preventDefault(); setArrastando(false); colados.adicionar([...e.dataTransfer.files]) }}>
             <button type="button" className="attach-button" aria-label="Anexar imagem" onClick={() => arquivo.current?.click()}>+</button>
-            <input ref={arquivo} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={e => { colados.adicionar([...(e.target.files ?? [])]); e.target.value = '' }} />
+            <input ref={arquivo} type="file" accept="image/png,image/jpeg,image/webp,audio/*,.mp3,.wav,.m4a" multiple hidden onChange={e => { colados.adicionar([...(e.target.files ?? [])]); e.target.value = '' }} />
             <label className="sr-only" htmlFor="chat-message">Sua mensagem para a IA</label><textarea id="chat-message" ref={input} rows={2}
-              placeholder="Me conta sua ideia, cola uma imagem (Ctrl+V) ou pede um ajuste…" value={texto} maxLength={6000}
+              placeholder='Me conta a ideia, cola uma imagem (Ctrl+V) ou arrasta o áudio da narração…' value={texto} maxLength={6000}
               onChange={e => setTexto(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (podeEnviar) void enviar(texto) } }} />
             <button className="send-button" type="submit" aria-label="Enviar mensagem" disabled={!podeEnviar}>↑</button>
           </form><p className="composer-note">Conversa pela assinatura do OpenClaw. Geração de vídeo só com seu custo aprovado.</p>

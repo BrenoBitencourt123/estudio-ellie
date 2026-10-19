@@ -56,13 +56,14 @@ if (process.argv.includes("--stdio")) {
     if (caminho === "/ia/status" && req.method === "GET") return responderJson(res, 200, await status());
     if (caminho === "/ia/ocupado" && req.method === "GET") return responderJson(res, 200, { ocupado: emAndamento > 0, emAndamento });
     if (caminho === "/ia/perguntar" && req.method === "POST") {
-      const corpo = (await lerJson(req)) as { texto?: unknown; imagens?: unknown; tempo_maximo_s?: unknown };
+      const corpo = (await lerJson(req)) as { texto?: unknown; imagens?: unknown; tempo_maximo_s?: unknown; escopo?: unknown };
       if (typeof corpo.texto !== "string" || !corpo.texto.trim()) return responderJson(res, 400, { erro: "texto vazio" });
       const imagens = Array.isArray(corpo.imagens) ? corpo.imagens.filter((i): i is string => typeof i === "string") : [];
       const tempo = typeof corpo.tempo_maximo_s === "number" ? Math.min(600, corpo.tempo_maximo_s) * 1000 : undefined;
+      const escopo = typeof corpo.escopo === "string" && corpo.escopo.trim() ? corpo.escopo.trim() : "geral";
       try {
         const inicio = Date.now();
-        const texto = await contando(() => perguntar(corpo.texto as string, imagens, tempo));
+        const texto = await contando(() => perguntar(corpo.texto as string, imagens, tempo, escopo));
         log(`OpenClaw respondeu em ${((Date.now() - inicio) / 1000).toFixed(1)}s`);
         return responderJson(res, 200, { texto });
       } catch (erro) {

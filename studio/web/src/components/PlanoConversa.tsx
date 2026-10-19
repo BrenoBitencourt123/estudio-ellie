@@ -15,10 +15,10 @@ export default function PlanoConversa({ producao, biblioteca, fechar, salvar }: 
     setPlan(p => ({ ...p, tomadas: p.tomadas.map((s, index) => index === i ? { ...s, ...data } : s) }))
   return <ConversaModal titulo="Estrutura do vídeo" fechar={fechar}>
     <p className="modal-intro">{plan.tomadas.length} tomadas · {plan.tomadas.reduce((a, s) => a + s.duracao, 0)} segundos brutos · {plan.duracao_final} segundos na montagem.</p>
-    <label className="field">Duração final, em segundos<input type="number" min="4" max="30" value={plan.duracao_final}
+    <label className="field">Duração final, em segundos<input type="number" min="1" max="90" value={plan.duracao_final}
       onChange={e => setPlan({ ...plan, duracao_final: Number(e.target.value) })} /></label>
     {plan.tomadas.map((shot, i) => <section className="shot-editor" key={shot.id}>
-      <div className="section-heading"><h3>{shot.titulo}</h3><span>{shot.lado === 'direita' ? 'Direita · contínuo' : 'Esquerda · transformação'}</span></div>
+      <div className="section-heading"><h3>{shot.titulo}</h3><span>{shot.lado === 'direita' ? 'Direita · contínuo' : shot.lado === 'esquerda' ? 'Esquerda · cortes' : 'Tela cheia'}</span></div>
       {shot.arquivo && <p className="success-note">Arquivo disponível: {shot.arquivo.nome}. Será reaproveitado.</p>}
       <div className="editor-grid"><label className="field">Modelo<select value={shot.modelo} disabled={!!shot.submit_id || !!shot.arquivo}
         onChange={e => changeShot(i, { modelo: e.target.value })}>
@@ -38,7 +38,7 @@ export default function PlanoConversa({ producao, biblioteca, fechar, salvar }: 
             disabled={!!shot.submit_id} onChange={e => changeShot(i, { movimento_duracao: Number(e.target.value) })} /></label></div>}
       </details>
     </section>)}
-    <details><summary>Cortes da metade esquerda</summary><div className="cuts-list">{plan.cortes.map((cut, i) => <div key={i} className="cut-row">
+    <details><summary>{plan.layout === 'lado_a_lado' ? 'Cortes da metade esquerda' : 'Cortes em sequência'}</summary><div className="cuts-list">{plan.cortes.map((cut, i) => <div key={i} className="cut-row">
       <span>{i + 1}. {plan.tomadas.find(s => s.id === cut.tomada)?.titulo}</span>
       <label>Início<input aria-label={`Início do corte ${i + 1}`} type="number" min="0" step="0.1" value={cut.inicio} onChange={e =>
         setPlan(p => ({ ...p, cortes: p.cortes.map((c, j) => j === i ? { ...c, inicio: Number(e.target.value) } : c) }))} /></label>

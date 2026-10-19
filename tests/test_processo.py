@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from studio.processo import Processo, Mensagem, Gerar, Selecao, create_router
+from studio.processo import Processo, Mensagem, Gerar, Selecao, create_router, plano_exemplo_ellie
 
 
 class FakeCli:
@@ -67,7 +67,11 @@ class ProductionTests(unittest.TestCase):
             Image.new('RGB', (32, 64), 'blue' if name.startswith('01') else 'cyan').save(self.root / 'base' / name)
         self.cli = FakeCli()
         self.s = Processo(self.root, lambda *_: json.dumps({"mensagem_pt": "Qual referência?", "blocos": [{"tipo": "quiz", "pergunta": "Qual?", "opcoes": ["A", "B"]}]}), cli=self.cli)
-        self.p = self.s.create('Teste')
+        self.p = self.s.create('Teste', 'duas_tomadas')
+        plano = plano_exemplo_ellie()
+        for shot in plano['tomadas']:
+            shot['imagens'] = [{"pasta": "base", "nome": '01-verao.png' if shot['lado'] == 'direita' else '04-outono.png'}]
+        self.p = self.s.save_plan(self.p, plano, self.p['versao'])
 
     def tearDown(self):
         self.temp.cleanup()
@@ -81,11 +85,55 @@ class ProductionTests(unittest.TestCase):
         self.s.store.save(p)
         return p
 
-    def test_default_is_two_shots_not_eight(self):
+    def test_nova_producao_comeca_vazia(self):
+        p = self.s.create('Livre')
+        self.assertEqual(p['tomadas'], [])
+        self.assertEqual(p['layout'], 'tela_cheia')
+        self.assertIsNone(p['master'])
+        self.assertEqual(p['legenda'], '')
+        self.assertEqual(p['faixa']['altura'], 0)
+        self.assertEqual(p['narracao']['texto'], '')
+        self.assertNotIn('pilar', p)
+
+    def test_exemplo_ellie_continua_lado_a_lado(self):
+        self.assertEqual(self.p['layout'], 'lado_a_lado')
         self.assertEqual(len(self.p['tomadas']), 2)
-        self.assertEqual(sum(s['duracao'] for s in self.p['tomadas']), 18)
-        self.assertEqual(self.p['duracao_final'], 9)
-        self.assertNotIn('pilar', self.p)
+        self.assertEqual(self.p['master']['nome'], 'ellie-aprovada.png')
+
+    def test_producao_antiga_sem_layout_vira_lado_a_lado(self):
+        from studio.processo import layout_de
+        self.assertEqual(layout_de({"formato": "duas_tomadas", "tomadas": [{}]}), 'lado_a_lado')
+        self.assertEqual(layout_de({"tomadas": [{}]}), 'lado_a_lado')
+        self.assertEqual(layout_de({"formato": "narrado", "tomadas": [{}]}), 'tela_cheia')
+
+    def test_tela_cheia_com_tres_cenas_e_corte_automatico(self):
+        p = self.s.create('Três cenas')
+        cena = lambda i: {"id": f"c{i}", "titulo": f"Cena {i}", "duracao": 5, "prompt": "Slow push-in over the sea at dawn.",
+                          "ellie": False}
+        p = self.s.save_plan(p, {"tomadas": [cena(1), cena(2), cena(3)]}, p['versao'])
+        self.assertEqual([c['tomada'] for c in p['cortes']], ['c1', 'c2', 'c3'])
+        self.assertEqual(p['duracao_final'], 15)
+        self.assertEqual(p['layout'], 'tela_cheia')
+
+    def test_lado_a_lado_exige_direita_continua(self):
+        p = self.s.create('Errado')
+        plano = {"layout": "lado_a_lado", "duracao_final": 5, "tomadas": [
+            {"id": "a", "titulo": "A", "lado": "esquerda", "duracao": 5, "prompt": "Some motion here."}],
+            "cortes": [{"tomada": "a", "duracao": 5}]}
+        with self.assertRaisesRegex(ValueError, 'direita'):
+            self.s.save_plan(p, plano, p['versao'])
+
+    def test_ia_liga_ellie_e_ve_historico(self):
+        vistos = []
+        def ask(texto, fotos):
+            vistos.append(texto)
+            return json.dumps({"mensagem_pt": "Liguei a Ellie.", "ellie": True})
+        s = Processo(self.root, ask, cli=self.cli)
+        p = s.create('Nova ideia')
+        p = s.chat(p['id'], Mensagem(texto='quero a Ellie numa ideia nova'))
+        self.assertEqual(p['master']['nome'], 'ellie-aprovada.png')
+        self.assertIn('PRODUÇÕES ANTERIORES', vistos[0])
+        self.assertIn('Teste', vistos[0])  # a produção anterior aparece para não repetir
 
     def test_stale_window_does_not_overwrite(self):
         old = copy.deepcopy(self.p)

@@ -1,0 +1,9 @@
+{
+  "name": "estudio-pinterest",
+  "private": true,
+  "type": "module",
+  "description": "Busca de referências no Pinterest para o Estúdio (usa o scraper do pinterest-mcp-server)",
+  "dependencies": {
+    "pinterest-mcp-server": "1.2.0"
+  }
+}

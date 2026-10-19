@@ -1,10 +1,10 @@
 // Ponte entre o Estúdio Ellie e o OpenClaw (Gateway local). O Estúdio usa o agente "ellie-studio" do OpenClaw
-// como IA pela assinatura do Breno (Claude ou GPT), sem chave de API. Cada pedido abre uma sessão nova,
-// com o contexto selecionado pelo aplicativo, sem duplicar o histórico no Gateway.
+// como IA pela assinatura do Breno (Claude ou GPT), sem chave de API. Os pedidos reaproveitam a sessão
+// do seu escopo enquanto ela serve, para aproveitar o cache de prompt do Gateway.
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { extname, join, resolve, sep } from "node:path";
+import { basename, extname, join, resolve, sep } from "node:path";
 import { GatewayClient } from "@openclaw/gateway-client";
 import { PROTOCOL_VERSION } from "@openclaw/gateway-protocol/version";
 
@@ -136,17 +136,52 @@ function anexo(caminho: string) {
   return { type: "image", fileName: absoluto.split(sep).pop()!, mimeType, content: bytes.toString("base64"), sizeBytes: statSync(absoluto).size };
 }
 
-// Manda um pedido (com imagens) ao agente e devolve o texto final da resposta
-export async function perguntar(texto: string, imagens: string[] = [], tempoMaximoMs = 600_000): Promise<string> {
+// Sessões reaproveitadas por escopo. Uma sessionKey nova a cada pedido obriga o Gateway a montar o
+// agente de novo (~25s) e manda o prompt de sistema inteiro sem cache (~29k tokens): medido 48,3s no
+// frio contra 19,1s reaproveitando. Então cada escopo guarda a sua sessão e só troca quando o contexto
+// já não serve: depois de JANELA_SESSAO_MS sem uso, depois de MAX_TURNOS_SESSAO pedidos, ou após falha.
+const JANELA_SESSAO_MS = 10 * 60_000;
+const MAX_TURNOS_SESSAO = 8;
+const sessoesPerguntar = new Map<string, { chave: string; expiraEm: number; turnos: number }>();
+
+function chaveDoEscopo(escopo: string): string {
+  const agora = Date.now();
+  const atual = sessoesPerguntar.get(escopo);
+  if (atual && atual.expiraEm > agora && atual.turnos < MAX_TURNOS_SESSAO) {
+    atual.expiraEm = agora + JANELA_SESSAO_MS;
+    atual.turnos += 1;
+    return atual.chave;
+  }
+  const chave = `agent:${AGENTE}:estudio-${escopo}-${agora}-${randomUUID().slice(0, 8)}`;
+  sessoesPerguntar.set(escopo, { chave, expiraEm: agora + JANELA_SESSAO_MS, turnos: 1 });
+  return chave;
+}
+
+// Manda um pedido (com imagens) ao agente e devolve o texto final da resposta.
+// `escopo` separa as sessões por tipo de tarefa: pedidos do mesmo escopo reaproveitam contexto e cache;
+// escopos diferentes nunca se misturam.
+export async function perguntar(
+  texto: string, imagens: string[] = [], tempoMaximoMs = 600_000, escopo = "geral",
+): Promise<string> {
   const anexos = imagens.map(anexo);
   await conectar();
-  const sessionKey = `agent:${AGENTE}:estudio-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const limpo = /^[a-zA-Z0-9_-]{1,40}$/.test(escopo) ? escopo : "geral";
+  const sessionKey = chaveDoEscopo(limpo);
+  // Sessão que falhou ou estourou o tempo sai do pool: o próximo pedido do escopo começa limpo
+  const descartar = () => {
+    if (sessoesPerguntar.get(limpo)?.chave === sessionKey) sessoesPerguntar.delete(limpo);
+  };
   const resposta = new Promise<string>((resolver, rejeitar) => {
     const timer = setTimeout(() => {
       esperas.delete(sessionKey);
+      descartar();
       rejeitar(new Error(`O OpenClaw demorou mais de ${tempoMaximoMs / 1000}s para responder.`));
     }, tempoMaximoMs);
-    esperas.set(sessionKey, { resolver: (r) => resolver(r.texto), rejeitar, timer });
+    esperas.set(sessionKey, {
+      resolver: (r) => resolver(r.texto),
+      rejeitar: (erro) => { descartar(); rejeitar(erro); },
+      timer,
+    });
   });
   try {
     await cliente!.request("chat.send", {
@@ -161,6 +196,7 @@ export async function perguntar(texto: string, imagens: string[] = [], tempoMaxi
       clearTimeout(espera.timer);
       esperas.delete(sessionKey);
     }
+    descartar();
     throw new Error(`O OpenClaw recusou o pedido: ${erro instanceof Error ? erro.message : String(erro)}`);
   }
   return resposta;
@@ -189,6 +225,10 @@ export type ResultadoConversa = {
 };
 
 const LIMITE_GATEWAY_MS = 180_000;
+// Agente que não é o último da fila espera menos antes de dar lugar à reserva: com o prazo cheio
+// (600s) um agente travado custava 10 min antes de tentar o próximo. Ao estourar, abortamos o turno
+// pelo Gateway (chat.abort) e só então chamamos a reserva, para não deixar dois modelos trabalhando.
+const LIMITE_PRIMEIRO_AGENTE_MS = 120_000;
 
 function esperarResposta(sessionKey: string, tempoMaximoMs: number, aoDelta?: Espera["aoDelta"]) {
   let espera!: Espera;
@@ -208,15 +248,19 @@ export async function conversar(pedido: PedidoConversa, aoDelta?: (texto: string
   const tentativas: Tentativa[] = [];
   await conectar();
   const ativos = AGENTES_CHAT.filter((a) => (pausados.get(a)?.ate ?? 0) < Date.now());
-  for (const agente of ativos.length ? ativos : AGENTES_CHAT) {
+  const fila = ativos.length ? ativos : AGENTES_CHAT;
+  for (const agente of fila) {
     const nome = agente;
     const sessionKey = `agent:${agente}:${pedido.sessao}`;
     const usarDelta = !!pedido.delta && pedido.modeloAnterior === nome;
     const texto = usarDelta ? pedido.delta! : pedido.completo;
     const inicio = Date.now();
+    const ehUltimo = agente === fila[fila.length - 1];
+    const prazoCheio = pedido.tempoMaximoMs ?? 600_000;
+    const prazo = ehUltimo ? prazoCheio : Math.min(LIMITE_PRIMEIRO_AGENTE_MS, prazoCheio);
     try {
       const anexos = (usarDelta ? pedido.imagensDelta ?? [] : pedido.imagensCompleto ?? []).map(anexo);
-      const { promessa } = esperarResposta(sessionKey, pedido.tempoMaximoMs ?? 600_000, aoDelta);
+      const { promessa } = esperarResposta(sessionKey, prazo, aoDelta);
       try {
         await cliente!.request("chat.send", {
           sessionKey, message: texto, idempotencyKey: randomUUID(), ...(anexos.length ? { attachments: anexos } : {}),
@@ -239,8 +283,19 @@ export async function conversar(pedido: PedidoConversa, aoDelta?: (texto: string
         process.stderr.write(`[conversa] ${agente} pausado por 15 min\n`);
       }
       process.stderr.write(`[conversa] ${nome} falhou: ${mensagem}\n`);
-      // Estourou o tempo: o modelo pode ainda estar trabalhando; não dispara outro em paralelo.
-      if ((erro as { tempo?: boolean }).tempo) break;
+      // Estourou o tempo: o modelo pode ainda estar trabalhando. Se ainda há reserva, aborta o turno
+      // pelo Gateway antes de chamar o próximo, para nunca ter dois modelos trabalhando em paralelo.
+      if ((erro as { tempo?: boolean }).tempo) {
+        if (ehUltimo) break;
+        try {
+          await cliente!.request("chat.abort", { sessionKey }, { timeoutMs: 15_000 });
+          process.stderr.write(`[conversa] ${nome} abortado após ${prazo / 1000}s; passando para a reserva\n`);
+        } catch (falha) {
+          // Não deu para abortar: não arrisca dois turnos em paralelo e para aqui.
+          process.stderr.write(`[conversa] não consegui abortar ${nome}: ${falha instanceof Error ? falha.message : String(falha)}\n`);
+          break;
+        }
+      }
       aoDelta?.("", true); // limpa texto parcial antes de tentar o próximo modelo
     }
   }
@@ -251,9 +306,45 @@ export const agentesConfigurados = () => AGENTES_CHAT;
 
 // Pasta onde o OpenClaw grava as imagens geradas (só arquivos daqui podem voltar para o Estúdio)
 const PASTA_MIDIA_OPENCLAW = join(homedir(), ".openclaw", "media");
-const REGEX_MIDIA = /MEDIA:\s*(.+?\.(?:png|jpe?g|webp))/gi;
 
 type Mensagem = { role?: string; content?: unknown };
+
+const PASTAS_IMAGEM_OPENCLAW = ["tool-image-generation", join("outgoing", "originals")].map((p) => join(PASTA_MIDIA_OPENCLAW, p));
+const REGEX_ARQUIVO = /[^\s"'<>|()\[\]]+\.(?:png|jpe?g|webp)/gi;
+
+function textosProfundos(valor: unknown, saida: string[] = []): string[] {
+  if (typeof valor === "string") saida.push(valor);
+  else if (Array.isArray(valor)) valor.forEach((v) => textosProfundos(v, saida));
+  else if (valor && typeof valor === "object") Object.values(valor).forEach((v) => textosProfundos(v, saida));
+  return saida;
+}
+
+// Procura caminhos de imagem em qualquer parte do histórico (texto "MEDIA:", blocos de imagem, resultado da ferramenta)
+export function imagensNoHistorico(mensagens: Mensagem[]): string[] {
+  const caminhos = new Set<string>();
+  for (const m of mensagens) {
+    if (m.role === "user") continue;
+    for (const texto of textosProfundos(m)) {
+      for (const achado of texto.matchAll(REGEX_ARQUIVO)) {
+        const bruto = achado[0].replace(/^MEDIA:/i, "").replace(/^file:\/\//i, "");
+        const direto = resolve(bruto);
+        if (direto.startsWith(PASTA_MIDIA_OPENCLAW + sep) && existsSync(direto)) { caminhos.add(direto); continue; }
+        for (const pasta of PASTAS_IMAGEM_OPENCLAW) {
+          const candidato = join(pasta, basename(bruto.replace(/\\/g, "/")));
+          if (existsSync(candidato)) { caminhos.add(candidato); break; }
+        }
+      }
+    }
+  }
+  return [...caminhos];
+}
+
+export function imagensNovas(desde: number): string[] {
+  const pasta = PASTAS_IMAGEM_OPENCLAW[0];
+  if (!existsSync(pasta)) return [];
+  return readdirSync(pasta).filter((n) => /\.(png|jpe?g|webp)$/i.test(n)).map((n) => join(pasta, n))
+    .map((c) => ({ c, t: statSync(c).mtimeMs })).filter((x) => x.t >= desde - 2000).sort((a, b) => a.t - b.t).map((x) => x.c);
+}
 
 function textosDaMensagem(m: Mensagem): string[] {
   if (typeof m.content === "string") return [m.content];
@@ -285,17 +376,15 @@ export async function gerarImagem(
   while (Date.now() - inicio < tempoMaximoMs) {
     await new Promise((r) => setTimeout(r, 4000));
     const historico = (await cliente!.request("chat.history", { sessionKey, limit: 30 })) as { messages?: Mensagem[] };
-    const caminhos = new Set<string>();
-    for (const m of historico.messages ?? []) {
-      if (m.role !== "assistant") continue;
-      for (const texto of textosDaMensagem(m)) {
-        for (const achado of texto.matchAll(REGEX_MIDIA)) {
-          const caminho = resolve(achado[1].trim());
-          if (caminho.startsWith(PASTA_MIDIA_OPENCLAW + sep)) caminhos.add(caminho);
-        }
-      }
+    const mensagens = historico.messages ?? [];
+    const achadas = imagensNoHistorico(mensagens);
+    if (achadas.length) return achadas;
+    // A resposta terminou (DONE) mas o caminho não veio no texto: pega o arquivo novo da ferramenta de imagem
+    const terminou = mensagens.some((m) => m.role === "assistant" && textosDaMensagem(m).some((t) => /\bDONE\b/.test(t)));
+    if (terminou) {
+      const novas = imagensNovas(inicio);
+      if (novas.length) return novas.slice(-1);
     }
-    if (caminhos.size) return [...caminhos];
   }
   throw new Error(`A imagem não ficou pronta em ${tempoMaximoMs / 1000}s.`);
 }

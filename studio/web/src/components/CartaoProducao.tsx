@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { processo, urlMidia, urlResultado } from '@/lib/processo'
+import CartaoNarracao from '@/components/CartaoNarracao'
 import type { Bloco, Producao, Tomada } from '@/types/processo'
 
 function estadoTomada(s: Tomada): { chave: string; rotulo: string } {
@@ -23,9 +24,9 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
   }
   const pending = producao.tomadas.filter(s => !s.arquivo && !s.submit_id)
   const waiting = producao.tomadas.some(s => s.submit_id && !s.arquivo)
-  const ready = producao.tomadas.every(s => s.arquivo)
+  const ready = producao.tomadas.length > 0 && producao.tomadas.every(s => s.arquivo)
   const active = busy || producao.ocupado
-  // Lote da próxima cotação: no modo teste, só a transformação (lado esquerdo)
+  // Lote da próxima cotação: no modo teste, só uma tomada (no lado a lado, a da esquerda)
   const lote = teste && pending.length > 1 ? [pending.find(s => s.lado === 'esquerda') ?? pending[0]] : pending
   // Só mostra a cotação se ela é deste lote e ainda não foi usada
   const cotacaoAtual = producao.cotacao && !producao.cotacao.executada
@@ -46,7 +47,7 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
         const st = estadoTomada(s)
         return <li key={s.id} className={`shot-${st.chave}`}>
           <div className="shot-head"><strong>{s.titulo}</strong><span className={`chip chip-${st.chave}`}>{st.rotulo}</span></div>
-          <small>{s.lado === 'esquerda' ? 'Lado esquerdo' : 'Lado direito'} · {s.duracao}s{typeof s.creditos_registrados === 'number' ? ` · ${s.creditos_registrados} créditos gastos` : ''}</small>
+          <small>{s.lado === 'esquerda' ? 'Lado esquerdo' : s.lado === 'direita' ? 'Lado direito' : 'Tela cheia'} · {s.duracao}s{typeof s.creditos_registrados === 'number' ? ` · ${s.creditos_registrados} créditos gastos` : ''}</small>
           {s.arquivo && <video className="shot-video" src={`${urlMidia(s.arquivo.pasta, s.arquivo.nome)}#t=0.8`} controls playsInline preload="metadata" />}
         </li>
       })}</ul>
@@ -57,7 +58,7 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
         <div className="cost-heading"><span>Próximo lote: {lote.map(s => s.titulo).join(' + ')}</span>
           <strong>{cotacaoAtual ? `${cotacaoAtual.total.toLocaleString('pt-BR')} créditos` : 'Ainda não cotado'}</strong></div>
         {pending.length > 1 && <label className="pilot-choice"><input type="checkbox" checked={teste} disabled={active} onChange={e => setTeste(e.target.checked)} />
-          Testar primeiro só a transformação, antes de pagar as outras tomadas.</label>}
+          Testar primeiro só uma tomada, antes de pagar as outras.</label>}
         {cotacaoAtual && <label className="field">Meu teto para este lote (créditos)
           <input type="number" min={cotacaoAtual.total} placeholder={String(cotacaoAtual.total)} value={teto} onChange={e => setTeto(e.target.value)} /></label>}
         <div className="card-buttons">
@@ -79,13 +80,20 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
       <div className="card-buttons"><a className="primary-button" href={urlResultado(producao.id)} download>Baixar vídeo</a>
         <button className="secondary-button" onClick={() => void navigator.clipboard.writeText(producao.legenda)}>Copiar legenda</button></div>
       <p className="caption-preview">{producao.legenda}</p></> : <p>A montagem ainda não foi concluída.</p>)}
-    {bloco.tipo === 'imagem' && bloco.pasta && (bloco.descartado ? <p className="discarded-note">Imagem descartada (está na pasta lixeira).</p> : <>
+    {bloco.tipo === 'imagem' && bloco.referencias && bloco.pasta === 'referencias' && <div className="reference-grid">
+      {bloco.nomes?.map(nome => <figure key={nome}>
+        <a href={urlMidia('referencias', nome)} target="_blank" rel="noreferrer"><img src={urlMidia('referencias', nome)} alt={`Referência do Pinterest: ${bloco.termo ?? ''}`} loading="lazy" /></a>
+        <figcaption><button className="secondary-button" disabled={active} onClick={() => void action(() => processo.usarImagem(producao.id, { pasta: 'referencias', nome }, 'quadro'))}>Usar como quadro</button>
+          <button className="secondary-button" disabled={active} onClick={() => void action(() => processo.usarImagem(producao.id, { pasta: 'referencias', nome }, 'recriar'))}>GPT recria</button></figcaption>
+      </figure>)}</div>}
+    {bloco.tipo === 'imagem' && bloco.pasta && !bloco.referencias && (bloco.descartado ? <p className="discarded-note">Imagem descartada (está na pasta lixeira).</p> : <>
       <div className="generated-images">{bloco.nomes?.map(nome => <a key={nome} href={urlMidia(bloco.pasta!, nome)} target="_blank" rel="noreferrer">
         <img src={urlMidia(bloco.pasta!, nome)} alt="Imagem gerada" /></a>)}</div>
       {bloco.gerada && <div className="card-buttons"><button className="secondary-button" disabled={active} onClick={() => responder('gera outra versão')}>Outra versão</button>
         {bloco.nomes?.map(nome => <button key={nome} className="secondary-button" disabled={active}
           onClick={() => void action(() => processo.descartar(producao.id, { pasta: bloco.pasta!, nome }))}>Descartar</button>)}</div>}
       {bloco.gerada && <small>Salva em {bloco.pasta} na biblioteca.</small>}</>)}
+    {bloco.tipo === 'narracao' && <CartaoNarracao producao={producao} atualizar={atualizar} />}
     {bloco.tipo === 'conexao' && <p>Abra o OpenClaw com a assinatura conectada. Depois, envie sua mensagem novamente. A produção está salva.</p>}
     {erro && <p role="alert" className="error-message">{erro}</p>}
   </section>

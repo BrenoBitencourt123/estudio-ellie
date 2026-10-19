@@ -87,8 +87,17 @@ class Dreamina:
             return
         raise CliError("Duração, resolução, modo ou referências não atendem ao catálogo atual do modelo.")
 
+    @staticmethod
+    def titulo_canvas(title: str) -> str:
+        """O serviço recusa títulos longos/acentuados ("service.2 invalid"): ASCII simples, até 40 caracteres."""
+        import unicodedata
+        limpo = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+        limpo = re.sub(r"[^A-Za-z0-9 _-]+", " ", limpo)
+        limpo = re.sub(r"\s+", " ", limpo).strip()[:40].strip()
+        return limpo or "Estudio Ellie"
+
     def canvas(self, id: str, title: str) -> dict:
-        return self.call("canvas", "create", title, "--project-id", id)
+        return self.call("canvas", "create", self.titulo_canvas(title), "--project-id", id)
 
     def upload(self, path: Path, project: str, resource: str, kind: str = "local_upload") -> dict:
         return self.call("resource", "upload", "--file", str(path), "--project-id", project,

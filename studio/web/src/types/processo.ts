@@ -1,15 +1,15 @@
-export type PastaMidia = 'persona' | 'base' | 'pecas' | 'cenarios' | 'movimentos' | 'saida' | 'anexos'
+export type PastaMidia = 'persona' | 'base' | 'pecas' | 'cenarios' | 'movimentos' | 'saida' | 'anexos' | 'quadros' | 'referencias'
 export type Midia = { pasta: PastaMidia; nome: string }
 export type Biblioteca = Record<PastaMidia, string[]>
 export type Bloco = {
-  tipo: 'galeria' | 'quiz' | 'plano' | 'custo' | 'resultado' | 'upload' | 'edicao' | 'conexao' | 'imagem'
+  tipo: 'galeria' | 'quiz' | 'plano' | 'custo' | 'resultado' | 'upload' | 'edicao' | 'conexao' | 'imagem' | 'narracao'
   titulo?: string; pasta?: PastaMidia; papel?: 'movimento' | 'master' | 'estado' | 'bruto'
-  nomes?: string[]; pergunta?: string; opcoes?: string[]; descartado?: boolean; gerada?: boolean
+  nomes?: string[]; pergunta?: string; opcoes?: string[]; descartado?: boolean; gerada?: boolean; referencias?: boolean; termo?: string
 }
 export type UsoIA = { modelo?: string; modo?: 'delta' | 'completo'; segundos?: number; usage?: Record<string, unknown> | null; tentativas?: number; caracteres?: number }
 export type MensagemChat = { id: string; papel: 'user' | 'assistant'; texto: string; blocos?: Bloco[]; anexos?: Midia[]; criado: string; ia?: UsoIA }
 export type Tomada = {
-  id: string; titulo: string; lado: 'esquerda' | 'direita'; modelo: string; modo: 'm2v' | 'first_last_frame'
+  id: string; titulo: string; lado: 'esquerda' | 'direita' | 'cheia'; ellie?: boolean | null; modelo: string; modo: 'm2v' | 'first_last_frame'
   resolucao: '480p' | '720p' | '1080p'; duracao: number; prompt: string; imagens: Midia[]
   movimento: Midia | null; movimento_inicio: number; movimento_duracao: number; recorte: number[] | null
   arquivo?: Midia; estado?: string; creditos_registrados?: number; reserva_creditos?: number; submit_id?: string
@@ -18,9 +18,13 @@ export type Corte = { tomada: string; inicio: number; duracao: number; recorte?:
 export type Faixa = {
   altura: number; sobretitulo: string; titulo: string; destaque: string; pergunta: string; esquerda: string; direita: string
 }
-export type PlanoProducao = { duracao_final: number; tomadas: Tomada[]; cortes: Corte[]; faixa: Faixa; legenda: string }
+export type Layout = 'tela_cheia' | 'lado_a_lado'
+export type PlanoProducao = { layout?: Layout; duracao_final: number; tomadas: Tomada[]; cortes: Corte[]; faixa: Faixa; legenda: string }
+export type Formato = 'duas_tomadas' | 'narrado'
+export type Narracao = { texto: string; voz: string; setas: boolean; cta?: string; audio: string | null; palavras: { p: string; ini: number; fim: number }[]; origem?: string }
 export type Producao = PlanoProducao & {
   id: string; nome: string; versao: number; criado: string; atualizado: string; status: string; erro: string; ocupado?: boolean
+  formato?: Formato; narracao?: Narracao
   master: Midia | null; referencia: Midia | null; mensagens: MensagemChat[]; canvas_url: string
   cotacao: { id: string; total: number; itens: { nodeId: string; maxCredits: number }[]; tomadas?: string[]; executada?: boolean } | null
   resultado?: { nome: string; duracao: number; width: number; height: number }

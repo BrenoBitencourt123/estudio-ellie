@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { processo } from '@/lib/processo'
 import type { Biblioteca, Midia, Producao, Selecao } from '@/types/processo'
 
-const vazia: Biblioteca = { persona: [], base: [], pecas: [], cenarios: [], movimentos: [], saida: [], anexos: [] }
+const vazia: Biblioteca = { persona: [], base: [], pecas: [], cenarios: [], movimentos: [], saida: [], anexos: [], quadros: [], referencias: [] }
 export function useConversa() {
   const [producoes, setProducoes] = useState<Producao[]>([])
   const [producao, setProducao] = useState<Producao | null>(null)

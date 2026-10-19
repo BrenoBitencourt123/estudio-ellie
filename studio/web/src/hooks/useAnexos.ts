@@ -7,14 +7,21 @@ import type { Midia } from '@/types/processo'
 export type Anexo = { id: string; url: string; asset?: Midia; erro?: string }
 
 const TIPOS = ['image/png', 'image/jpeg', 'image/webp']
+const AUDIO = /^audio\/|\.(mp3|wav|m4a|ogg)$/i
+const ehAudio = (f: File) => AUDIO.test(f.type) || AUDIO.test(f.name)
 const MAXIMO = 4
 
-export function useAnexos() {
+// aoAudio: áudio colado/arrastado (narração do vídeo) vai direto para quem cuida dele
+export function useAnexos(aoAudio?: (f: File) => void) {
   const [anexos, setAnexos] = useState<Anexo[]>([])
   const lista = useRef<Anexo[]>([])
   lista.current = anexos
 
+  const audio = useRef(aoAudio)
+  audio.current = aoAudio
   const adicionar = useCallback((files: File[]) => {
+    const audios = files.filter(ehAudio)
+    if (audios.length && audio.current) audio.current(audios[0])
     const imagens = files.filter(f => TIPOS.includes(f.type)).slice(0, Math.max(0, MAXIMO - lista.current.length))
     for (const file of imagens) {
       const id = crypto.randomUUID()
@@ -24,7 +31,7 @@ export function useAnexos() {
         .then(asset => setAnexos(atual => atual.map(a => a.id === id ? { ...a, asset } : a)))
         .catch(e => setAnexos(atual => atual.map(a => a.id === id ? { ...a, erro: e instanceof Error ? e.message : 'Não subiu' } : a)))
     }
-    return imagens.length
+    return imagens.length + (audios.length && audio.current ? 1 : 0)
   }, [])
 
   const remover = useCallback((id: string) => setAnexos(atual => {
@@ -41,7 +48,7 @@ export function useAnexos() {
       const alvo = e.target as HTMLElement | null
       if (alvo && alvo.closest('.conversation-modal')) return
       const files = [...(e.clipboardData?.files ?? [])]
-      if (files.some(f => TIPOS.includes(f.type)) && adicionar(files)) e.preventDefault()
+      if (files.some(f => TIPOS.includes(f.type) || ehAudio(f)) && adicionar(files)) e.preventDefault()
     }
     window.addEventListener('paste', aoColar)
     return () => window.removeEventListener('paste', aoColar)

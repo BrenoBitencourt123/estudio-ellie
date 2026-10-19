@@ -46,6 +46,8 @@ O ZIP de demonstração inclui o exemplo **“Verão → outono · exemplo pront
 
 **Claude + GPT no chat:** configure `OPENCLAW_MODELO_CHAT` (ex.: Claude) e `OPENCLAW_MODELO_RESERVA` (ex.: GPT) no `.env`; a reserva assume sozinha se o principal falhar. Cada produção mantém uma sessão contínua: a primeira mensagem leva o contexto completo e as próximas só o que mudou. A resposta aparece enquanto chega, e cada uma mostra modelo, tokens e tempo. [Como configurar](docs/OPENCLAW_ASSINATURAS.md).
 
+**Formato narrado (cena única + voz + legenda karaokê + CTA):** escolha "Narrado com legenda" ao começar um vídeo. Cole uma imagem e escolha "Usar como quadro inicial" (ou peça o quadro ao GPT), cote e gere a cena (~10 s) no Dreamina, gere a voz pelo ElevenLabs (`ELEVENLABS_API_KEY` e `ELEVENLABS_VOZ` no `.env`) ou envie um áudio pronto, e monte localmente, sem créditos. A legenda é sincronizada pelo tempo de cada palavra. Com áudio enviado, usa o texto do roteiro e, se instalado, o Whisper local (`pip install faster-whisper`) para os tempos.
+
 ## Assinatura e créditos são separados
 
 Conversar/planejar: conexão local com o OpenClaw e sua assinatura configurada. Gerar vídeo: créditos Dreamina, com cotação atual e botão humano de autorização. Cortar, trocar texto/faixa e remontar: local, sem créditos de geração. Publicação continua manual.

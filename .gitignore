@@ -27,11 +27,17 @@ cenarios/*
 !cenarios/.gitkeep
 movimentos/*
 !movimentos/.gitkeep
+quadros/*
+!quadros/.gitkeep
+referencias/*
+!referencias/.gitkeep
 exemplos/producao-v7.json
 docs/previa-*.png
 movimentos/.limpos/
 anexos/
 lixeira/
+.tmp_prev/
+studio/agente-ellie/output/
 studio/agente-ellie/.openclaw-cli-images/
 studio/agente-ellie/media/
 studio/agente-ellie/skills/
@@ -43,6 +49,7 @@ studio/agente-ellie/.openclaw/
 studio/web/node_modules/
 studio/web/dist/
 studio/mcp/node_modules/
+studio/pinterest/node_modules/
 __pycache__/
 *.pyc
 .venv/

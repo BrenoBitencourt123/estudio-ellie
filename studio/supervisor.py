@@ -1,6 +1,7 @@
 """Supervisor do Estúdio Ellie: roda em segundo plano, sem janelas.
 
 - Sobe o servidor (FastAPI, porta 8000) e a ponte OpenClaw (Node, porta 8790), escondidos.
+- Liga o gateway do OpenClaw se ele estiver desligado (e religa se cair). Não o derruba ao sair.
 - Se um deles cair, sobe de novo (com espera crescente para não ficar em loop).
 - Observa os arquivos do sistema. Quando algo muda (uma correção, uma atualização), espera o
   Estúdio ficar livre (nenhuma resposta da IA, imagem ou vídeo em andamento) e só então reinicia
@@ -178,6 +179,94 @@ class Processo:
             self.falhas = 0
 
 
+def porta_gateway() -> int:
+    url = ler_env().get("OPENCLAW_URL", "") or "ws://127.0.0.1:18789"
+    try:
+        return int(url.rsplit(":", 1)[1].split("/")[0])
+    except (IndexError, ValueError):
+        return 18789
+
+
+def achar_openclaw() -> str | None:
+    candidatos = [shutil.which("openclaw"), str(Path(os.environ.get("APPDATA", "")) / "npm" / "openclaw.cmd")]
+    return next((c for c in candidatos if c and Path(c).exists()), None)
+
+
+class Gateway:
+    """Garante o gateway do OpenClaw ligado. Ele é compartilhado (outros programas usam), então o supervisor
+    só liga quando está desligado e nunca o derruba ao encerrar.
+    Tentativas: 'openclaw gateway start' (serviço instalado); se a porta não abrir, roda o gateway escondido."""
+    MODOS = (["gateway", "start"], ["gateway", "run"], ["gateway"])
+
+    ARQUIVO_MODO = LOGS / "gateway-modo.txt"  # o modo que funcionou da última vez é tentado primeiro
+
+    def __init__(self):
+        self.proc: subprocess.Popen | None = None
+        try:
+            self.modo = self.MODOS.index(self.ARQUIVO_MODO.read_text(encoding="utf-8").strip().split())
+        except (OSError, ValueError):
+            self.modo = 0
+        self.proxima = 0.0
+        self.espera = 15
+        self.tentando: list[str] | None = None  # modo em andamento, para registrar quando a porta abrir tarde
+
+    def _ligou(self, args: list[str]):
+        log(f"gateway: ligado com 'openclaw {' '.join(args)}'")
+        self.espera = 15
+        self.tentando = None
+        try:
+            self.ARQUIVO_MODO.write_text(" ".join(args), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _esperar_porta(self, segundos: float) -> bool:
+        fim = time.time() + segundos
+        while time.time() < fim:
+            if porta_ocupada(porta_gateway()):
+                return True
+            time.sleep(1)
+        return False
+
+    def cuidar(self):
+        if porta_ocupada(porta_gateway()):
+            if self.tentando:  # subiu depois do tempo de espera
+                self._ligou(self.tentando)
+            return
+        if time.time() < self.proxima:
+            return
+        if self.proc and self.proc.poll() is None:  # ainda subindo
+            self.proxima = time.time() + 5
+            return
+        exe = achar_openclaw()
+        if not exe:
+            log("gateway: comando 'openclaw' não encontrado; ligue o OpenClaw manualmente")
+            self.proxima = time.time() + 300
+            return
+        args = self.MODOS[self.modo % len(self.MODOS)]
+        self.tentando = list(args)
+        log(f"gateway: porta {porta_gateway()} fechada; tentando 'openclaw {' '.join(args)}'")
+        saida = (LOGS / "gateway.log").open("ab")
+        try:
+            if args == ["gateway", "start"]:
+                subprocess.run([exe, *args], stdout=saida, stderr=saida, stdin=subprocess.DEVNULL,
+                               timeout=90, creationflags=SEM_JANELA)
+                ok = self._esperar_porta(30)
+            else:
+                self.proc = subprocess.Popen([exe, *args], stdout=saida, stderr=saida, stdin=subprocess.DEVNULL,
+                                             cwd=Path.home(), creationflags=SEM_JANELA)
+                ok = self._esperar_porta(45)
+        except (OSError, subprocess.SubprocessError) as e:
+            log("gateway: falhou ao executar:", repr(e))
+            ok = False
+        if ok:
+            self._ligou(list(args))
+            return
+        self.modo += 1
+        if self.modo % len(self.MODOS) == 0:  # deu a volta em todos: espera crescente
+            self.espera = min(600, self.espera * 2)
+        self.proxima = time.time() + (5 if self.modo % len(self.MODOS) else self.espera)
+
+
 def pid_vivo(pid: int) -> bool:
     if os.name == "nt":
         saida = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True,
@@ -265,6 +354,17 @@ def main():
     if "--abrir" in sys.argv:
         import threading
         threading.Thread(target=abrir_quando_pronto, daemon=True).start()
+    gateway = Gateway()
+
+    def vigiar_gateway():  # em paralelo: ligar o gateway pode levar 1-2 min e não deve atrasar o Estúdio
+        while not ARQ_PARAR.exists():
+            try:
+                gateway.cuidar()
+            except Exception as e:
+                log("gateway: erro:", repr(e))
+            time.sleep(INTERVALO)
+    import threading
+    threading.Thread(target=vigiar_gateway, daemon=True).start()
     try:
         while not ARQ_PARAR.exists():
             for grupo, servico in servicos.items():

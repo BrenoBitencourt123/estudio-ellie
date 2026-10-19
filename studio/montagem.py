@@ -57,7 +57,13 @@ def fonte(size: int, italic: bool = False):
     return ImageFont.load_default(size=size)
 
 
-def overlay(config: dict, dest: Path) -> None:
+def tem_faixa(config: dict) -> bool:
+    return int(config.get("altura", 0) or 0) > 0 and any(
+        str(config.get(k, "")).strip() for k in ("sobretitulo", "titulo", "destaque", "pergunta", "esquerda", "direita"))
+
+
+def overlay(config: dict, dest: Path, divisoria: bool = True) -> None:
+    """Faixa de texto no topo (720x1280). Só desenha os campos preenchidos; divisoria = linha do lado a lado."""
     scale = 3
     img = Image.new("RGBA", (720 * scale, 1280 * scale))
     draw = ImageDraw.Draw(img)
@@ -77,26 +83,41 @@ def overlay(config: dict, dest: Path) -> None:
                             x + width + 5 * scale, (y + size * 1.02) * scale), fill=yellow)
         draw.text((x, y * scale), text, font=f, fill=ink, anchor="lt")
 
+    def campo(k: str) -> str:
+        return str(config.get(k, "") or "").strip()
+
     if h > 0:
         if h >= 300 * scale:
-            centered(config.get("sobretitulo", "ONE OUTFIT / TWO SEASONS"), 18, 18)
-            centered(config.get("titulo", "Summer to"), 66, 64)
-            centered(config.get("destaque", "autumn."), 151, 72, True, True)
-            centered(config.get("pergunta", "Which would you wear — summer or autumn?"), 242, 24)
+            if campo("sobretitulo"):
+                centered(campo("sobretitulo"), 18, 18)
+            if campo("titulo"):
+                centered(campo("titulo"), 66, 64)
+            if campo("destaque"):
+                centered(campo("destaque"), 151, 72, True, True)
+            if campo("pergunta"):
+                centered(campo("pergunta"), 242, 24)
             label_y = int(config.get("altura", 350)) - 35
         else:
-            centered(config.get("titulo", "Summer to") + " " + config.get("destaque", "autumn."), 20, 42)
-            centered(config.get("pergunta", ""), 80, 20)
+            linha = " ".join(v for v in (campo("titulo"), campo("destaque")) if v)
+            if linha:
+                centered(linha, 20, 42)
+            if campo("pergunta"):
+                centered(campo("pergunta"), 80, 20)
             label_y = max(110, int(config.get("altura", 132)) - 25)
-        draw.line((40 * scale, (label_y - 18) * scale, 680 * scale, (label_y - 18) * scale), fill="#CFC5B5", width=scale)
-        for text, x in [(config.get("esquerda", "AUTUMN"), 180), (config.get("direita", "SUMMER"), 540)]:
+        rotulos = [(campo("esquerda"), 180), (campo("direita"), 540)]
+        if any(t for t, _ in rotulos):
+            draw.line((40 * scale, (label_y - 18) * scale, 680 * scale, (label_y - 18) * scale), fill="#CFC5B5", width=scale)
+        for text, x in rotulos:
+            if not text:
+                continue
             f = fonte(20 * scale)
             while draw.textlength(text, font=f) > 300 * scale:
                 f = fonte(max(12 * scale, f.size - scale))
                 if f.size <= 12 * scale:
                     break
             draw.text((x * scale, label_y * scale), text, font=f, fill=ink, anchor="mt")
-    draw.line((360 * scale, h, 360 * scale, 1280 * scale), fill="#F6F0E680", width=scale)
+    if divisoria:
+        draw.line((360 * scale, h, 360 * scale, 1280 * scale), fill="#F6F0E680", width=scale)
     img.resize((720, 1280), Image.Resampling.LANCZOS).save(dest)
 
 
@@ -142,7 +163,7 @@ def montar(production: dict, resolve_asset, output: Path) -> dict:
         names.append(f"file '{name}'")
     (work / "partes.txt").write_text("\n".join(names), encoding="utf-8")
     ffmpeg("-f", "concat", "-safe", "0", "-i", str(work / "partes.txt"), "-c", "copy", "-an", "-y", str(work / "esquerda.mp4"))
-    overlay(production["faixa"], work / "faixa.png")
+    overlay(production.get("faixa") or {}, work / "faixa.png")
     filters = ("[1:v]fps=30,trim=end_frame=" + str(frames) + ",setpts=PTS-STARTPTS," +
                filtro_painel(right_info, summer.get("recorte")) + "[right];"
                "[0:v]setpts=PTS-STARTPTS[left];[left][right]hstack=inputs=2[base];"
@@ -154,4 +175,61 @@ def montar(production: dict, resolve_asset, output: Path) -> dict:
     data = probe(final)
     if data["width"] != 720 or data["height"] != 1280 or abs(data["duracao"] - production["duracao_final"]) > .04:
         raise ValueError("A montagem não corresponde à duração ou resolução escolhida.")
+    return {"caminho": str(final), "sha256": sha256(final), **data}
+
+
+LC, AC = 1080, 1920  # tela cheia
+
+
+def filtro_cheio(info: dict, crop: list[int] | None) -> str:
+    if crop:
+        w, h, x, y = crop
+        if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > info["width"] or y + h > info["height"]:
+            raise ValueError("O recorte ultrapassa os limites da tomada.")
+        return f"crop={w}:{h}:{x}:{y},scale={LC}:{AC}:force_original_aspect_ratio=increase,crop={LC}:{AC},setsar=1"
+    return f"scale={LC}:{AC}:force_original_aspect_ratio=increase,crop={LC}:{AC},setsar=1"
+
+
+def montar_sequencia(production: dict, resolve_asset, output: Path) -> dict:
+    """Tela cheia 9:16: os cortes em sequência (1 ou várias cenas), faixa de texto opcional. Sem áudio."""
+    shots = {s["id"]: s for s in production["tomadas"]}
+    cuts = production["cortes"]
+    frames = round(production["duracao_final"] * 30)
+    if sum(round(c["duracao"] * 30) for c in cuts) != frames:
+        raise ValueError("Os cortes precisam preencher exatamente a duração final.")
+    output.mkdir(parents=True, exist_ok=True)
+    version = f"edicao-{production['versao']}"
+    work = output / version
+    work.mkdir(exist_ok=True)
+    names = []
+    for i, cut in enumerate(cuts):
+        shot = shots.get(cut["tomada"])
+        if not shot or not shot.get("arquivo"):
+            raise ValueError("Um corte não tem tomada pronta.")
+        source = resolve_asset(shot["arquivo"])
+        info = probe(source)
+        if cut["inicio"] + cut["duracao"] > info["duracao"] + .03:
+            raise ValueError("O corte ultrapassa a duração real da tomada " + shot["titulo"])
+        name = f"parte-{i:02}.mp4"
+        n = round(cut["duracao"] * 30)
+        # tpad garante os quadros finais mesmo se o arquivo terminar um pouco antes
+        ffmpeg("-ss", str(cut["inicio"]), "-i", str(source), "-vf",
+               "fps=30," + filtro_cheio(info, cut.get("recorte") or shot.get("recorte")) + ",tpad=stop_mode=clone:stop_duration=0.2",
+               "-frames:v", str(n), "-an", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-y", str(work / name))
+        names.append(f"file '{name}'")
+    (work / "partes.txt").write_text("\n".join(names), encoding="utf-8")
+    final = output / f"{version}.mp4"
+    faixa = production.get("faixa") or {}
+    if tem_faixa(faixa):
+        ffmpeg("-f", "concat", "-safe", "0", "-i", str(work / "partes.txt"), "-c", "copy", "-an", "-y", str(work / "sequencia.mp4"))
+        overlay(faixa, work / "faixa.png", divisoria=False)
+        ffmpeg("-i", str(work / "sequencia.mp4"), "-i", str(work / "faixa.png"), "-filter_complex",
+               f"[1:v]scale={LC}:{AC}[f];[0:v][f]overlay=0:0:format=auto,format=yuv420p[out]", "-map", "[out]",
+               "-frames:v", str(frames), "-an", "-c:v", "libx264", "-crf", "18", "-movflags", "+faststart", "-y", str(final))
+    else:
+        ffmpeg("-f", "concat", "-safe", "0", "-i", str(work / "partes.txt"), "-frames:v", str(frames), "-an",
+               "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", str(final))
+    data = probe(final)
+    if abs(data["duracao"] - production["duracao_final"]) > .1:
+        raise ValueError("A montagem não corresponde à duração escolhida.")
     return {"caminho": str(final), "sha256": sha256(final), **data}

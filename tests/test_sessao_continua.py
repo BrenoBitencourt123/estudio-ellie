@@ -40,7 +40,7 @@ class SessaoContinuaTests(unittest.TestCase):
                     "segundos": 1.2, "usage": {"input": 10, "output": 5}, "tentativas": self.tentativas}
 
         self.s = Processo(self.root, lambda *a: self.fail('modo antigo não deveria ser usado'), cli=FakeCli(), conversar=conversar)
-        self.p = self.s.create('teste')
+        self.p = self.s.create('teste', 'duas_tomadas')
 
     def tearDown(self):
         self.temp.cleanup()

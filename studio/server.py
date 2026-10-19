@@ -53,6 +53,7 @@ PASTAS = {
     "cenarios": gerar.PASTA_CENARIOS,
     "movimentos": gerar.PASTA_MOVIMENTOS,
     "base": PASTA / "base",  # imagem única da Ellie (já vestida e no cenário) usada pelo Kling
+    "quadros": PASTA / "quadros",  # quadros iniciais do formato narrado (gerados pelo GPT Image)
 }
 
 # Kling Motion Control na Atlas Cloud: usa 1 imagem + 1 vídeo de movimento, cobra por segundo de vídeo gerado.
@@ -409,12 +410,16 @@ def estimar(p: PedidoVideo):
 # Assistente de prompt (IA escreve a cena a partir da sua ideia e das referências)
 # ---------------------------------------------------------------------------
 
-def perguntar_ia(texto: str, imagens: list[Path], tempo_maximo_s: int = 600) -> str:
-    """Pergunta ao agente do Estúdio pela ponte OpenClaw e devolve o texto da resposta."""
+def perguntar_ia(texto: str, imagens: list[Path], tempo_maximo_s: int = 600, escopo: str = "geral") -> str:
+    """Pergunta ao agente do Estúdio pela ponte OpenClaw e devolve o texto da resposta.
+
+    `escopo` agrupa os pedidos do mesmo tipo de tarefa numa sessão só, para reaproveitar o cache de
+    prompt do Gateway. Escopos diferentes nunca compartilham contexto."""
     try:
         r = requests.post(
             f"{URL_IA}/ia/perguntar",
-            json={"texto": texto, "imagens": [str(i) for i in imagens], "tempo_maximo_s": tempo_maximo_s},
+            json={"texto": texto, "imagens": [str(i) for i in imagens], "tempo_maximo_s": tempo_maximo_s,
+                  "escopo": escopo},
             timeout=tempo_maximo_s + 20,
         )
     except requests.Timeout:
@@ -519,7 +524,7 @@ def assistente_de_prompt(a: PedidoAssistente):
 
     if provedor == "openclaw":
         try:
-            return {**base, "resultado": assistente.interpretar_resposta(perguntar_ia(briefing, folhas))}
+            return {**base, "resultado": assistente.interpretar_resposta(perguntar_ia(briefing, folhas, escopo="prompt"))}
         except (RuntimeError, ValueError) as erro:
             # Sem OpenClaw o pedido não se perde: cai no modo manual
             return {
@@ -758,7 +763,7 @@ def revisar_com_ia(r: PedidoRevisao):
         'for the creator: what is good and what to change next time", "nota_sugerida": "bom" or "ruim"}'
     )
     try:
-        bruto = perguntar_ia(pedido_ia, [folha])
+        bruto = perguntar_ia(pedido_ia, [folha], escopo="revisao")
         dados = assistente.extrair_json(bruto)
     except (RuntimeError, AttributeError, ValueError) as erro:
         raise HTTPException(502, f"A revisão com IA falhou: {erro}")
@@ -827,7 +832,7 @@ def sugerir_legenda(r: PedidoLegenda):
         f"# Profile guide\n{perfil}"
     )
     try:
-        dados = assistente.extrair_json(perguntar_ia(texto, [folha]))
+        dados = assistente.extrair_json(perguntar_ia(texto, [folha], escopo="legenda"))
     except (RuntimeError, ValueError) as erro:
         if not do_projeto:
             raise HTTPException(502, f"A sugestão de legenda falhou: {erro}")
@@ -964,7 +969,7 @@ def sugerir_texto_na_tela(s: PedidoSugestaoTexto):
         "\"tamanho\" is the font size in pixels on a 1080x1920 video (between 44 and 90)."
     )
     try:
-        dados = assistente.extrair_json(perguntar_ia(pedido_ia, [folha]))
+        dados = assistente.extrair_json(perguntar_ia(pedido_ia, [folha], escopo="texto-tela"))
     except (RuntimeError, ValueError) as erro:
         raise HTTPException(502, f"A sugestão de estilo falhou: {erro}")
     texto = (s.texto.strip() or str(dados.get("texto_en", "")).strip()).replace("—", ",").replace("–", ",")[:160]
@@ -1113,6 +1118,8 @@ ESTILO_MIDIA = {
             "same hair and body, outfit fully visible, natural light, realistic hands, clean background details, no text.",
     "persona": "Photorealistic vertical smartphone photo of the same young woman as the reference photos (Ellie): "
                "same face, hair and body, natural light, no text.",
+    "quadros": "Cinematic vertical 9:16 film still, dramatic volumetric light, rich colour, high detail, wide shot with "
+               "room for motion, no text, no captions, no watermark.",
 }
 
 
@@ -1167,7 +1174,8 @@ class PedidoNovaMidia(BaseModel):
     escopo: Literal["look", "peca"] = "look"
 
 
-O_QUE_COPIAR = {"pecas": "the garment", "cenarios": "the place", "base": "the outfit", "persona": "the look and style"}
+O_QUE_COPIAR = {"pecas": "the garment", "cenarios": "the place", "base": "the outfit", "persona": "the look and style",
+                "quadros": "the scene composition, subject, lighting and mood"}
 
 
 def salvar_referencias_coladas(dados: list[str]) -> list[Path]:
@@ -1213,6 +1221,12 @@ def gerar_com_referencias(pasta: str, descricao: str, nome: str, coladas: list[P
             + "Ignore any person, background, text, price tags and watermarks in them. "
             "Pass all attached images to the image tool as reference images."
         )
+        if pasta == "quadros":
+            instrucao = (
+                f"The {len(coladas)} attached image(s) are visual references from the creator: keep the same subject, "
+                "composition, lighting and mood, recreated as a clean original vertical frame. Remove any text, captions, "
+                "arrows, stickers and watermarks. Pass all attached images to the image tool as reference images."
+            )
         if pasta == "cenarios":
             instrucao = (
                 f"The first {len(coladas)} attached image(s) are references from the creator: recreate the PLACE "
@@ -1392,7 +1406,7 @@ def criar_plano(pp: PedidoPlano):
         pp.ideia, movimento, duracao_video, inicio, folhas_bib, assets, apr["recomendacoes"], rejeitados,
     )
     try:
-        bruto = perguntar_ia(texto, folhas, tempo_maximo_s=300)
+        bruto = perguntar_ia(texto, folhas, tempo_maximo_s=300, escopo="plano")
         dados = assistente.extrair_json(bruto)
     except (RuntimeError, ValueError) as erro:
         raise HTTPException(502, f"Não consegui o plano da IA: {erro}")
@@ -1666,7 +1680,7 @@ def estrategia_do_projeto(projeto_id: str):
     perfil = ARQUIVO_PERFIL.read_text(encoding="utf-8") if ARQUIVO_PERFIL.exists() else ""
     ideia = f"{projeto.get('titulo', '')}\n{projeto.get('ideia', '')}".strip()
     try:
-        dados = assistente.extrair_json(perguntar_ia(projetos.pedido_estrategia(perfil, ideia, contexto_estrategia()), []))
+        dados = assistente.extrair_json(perguntar_ia(projetos.pedido_estrategia(perfil, ideia, contexto_estrategia()), [], escopo="estrategia"))
     except (RuntimeError, ValueError) as erro:
         raise HTTPException(502, f"A estratégia com IA falhou: {erro}")
     aplicar_estrategia(projeto, projetos.normalizar_estrategia(dados))
@@ -1775,7 +1789,7 @@ def gerar_pauta(p: PedidoPauta):
     perfil = ARQUIVO_PERFIL.read_text(encoding="utf-8") if ARQUIVO_PERFIL.exists() else ""
     try:
         dados = assistente.extrair_json(
-            perguntar_ia(projetos.pedido_pauta(perfil, p.quantidade, p.foco, contexto_estrategia()), [], tempo_maximo_s=400)
+            perguntar_ia(projetos.pedido_pauta(perfil, p.quantidade, p.foco, contexto_estrategia()), [], tempo_maximo_s=400, escopo="pauta")
         )
     except (RuntimeError, ValueError) as erro:
         raise HTTPException(502, f"A pauta com IA falhou: {erro}")

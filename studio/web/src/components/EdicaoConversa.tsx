@@ -18,7 +18,7 @@ export default function EdicaoConversa({ producao, fechar, salvar }: { producao:
       onChange={e => alterar(key, e.target.value)} /></label>)}</div>
     <label className="field">Altura da faixa: {faixa.altura}px<input type="range" min="0" max="400" step="10" value={faixa.altura}
       onChange={e => alterar('altura', Number(e.target.value))} /></label>
-    <p className="field-note">350px cobre o rosto em pé. Uma faixa mais alta também esconde parte da roupa.</p>
+    <p className="field-note">Altura 0 = sem faixa. Campo vazio não aparece no vídeo.</p>
     <label className="field">Legenda e hashtags<textarea rows={4} value={legenda} onChange={e => setLegenda(e.target.value)} /></label>
     {erro && <p className="error-message" role="alert">{erro}</p>}
     <footer className="modal-footer"><span>Edição local · sem créditos de geração</span><button className="primary-button" disabled={ocupado} onClick={async () => {
