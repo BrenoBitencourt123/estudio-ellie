@@ -48,7 +48,7 @@ class PinterestTests(unittest.TestCase):
 
     def esperar(self):
         for _ in range(200):
-            if self.p['id'] not in self.s.busy:
+            if not self.s.ocupado(self.p['id'], 'midia'):
                 return self.s.store.get(self.p['id'])
             time.sleep(0.05)
         self.fail('não terminou')
@@ -73,7 +73,7 @@ class PinterestTests(unittest.TestCase):
         self.assertEqual(self.buscas, [('jesus storm', 6)])  # o termo curto que a IA escolheu
 
     def test_imagem_gerada_vira_quadro_mesmo_ocupado(self):
-        self.s.background(self.p['id'], self.s._gerar_imagem, 'quadros', 'storm', [], False)
+        self.s.background(self.p['id'], self.s._gerar_imagem, 'quadros', 'storm', [], False, faixa='midia')
         (self.root / 'quadros').mkdir(exist_ok=True)
         p = self.esperar()
         self.assertEqual(p['tomadas'][0]['imagens'], [{"pasta": "quadros", "nome": "q.png"}])

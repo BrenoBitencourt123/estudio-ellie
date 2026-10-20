@@ -48,7 +48,7 @@ class ColarImagemTests(unittest.TestCase):
 
     def esperar(self):
         for _ in range(100):
-            if self.p['id'] not in self.s.busy:
+            if not self.s.ocupado(self.p['id'], 'midia'):
                 return
             time.sleep(0.02)
         self.fail('geração não terminou')

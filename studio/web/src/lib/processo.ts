@@ -1,4 +1,8 @@
-import type { Biblioteca, Midia, ModeloVideo, PlanoProducao, Producao, Selecao } from '@/types/processo'
+import type { Biblioteca, FaixaTrabalho, Midia, ModeloVideo, PlanoProducao, Producao, Selecao } from '@/types/processo'
+
+// Só a faixa em questão trava o botão dela; o resto da tela (e o chat) continua livre.
+export const naFaixa = (p: Producao | null | undefined, ...faixas: FaixaTrabalho[]) =>
+  (p?.trabalhos ?? []).some(t => faixas.includes(t.faixa))
 
 async function request<T>(path: string, method = 'GET', body?: unknown, human = false): Promise<T> {
   const response = await fetch(`/api/processo${path}`, {

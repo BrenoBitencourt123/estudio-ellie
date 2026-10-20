@@ -23,6 +23,20 @@ DESTINOS_IMAGEM = ("cenarios", "pecas", "base", "persona", "quadros")
 VIDEO = {".mp4", ".mov", ".webm", ".m4v"}
 IMAGEM = {".png", ".jpg", ".jpeg", ".webp"}
 
+# Faixas de trabalho: cada tipo de operação corre na sua, e só disputa vaga com as do mesmo tipo.
+# Assim a conversa nunca espera uma imagem, e uma imagem nunca espera a narração.
+#   midia     — imagem do GPT e busca no Pinterest: só criam arquivo novo, podem ir várias juntas
+#   voz       — ElevenLabs e sincronização do áudio enviado: uma por vez (escrevem a mesma narração)
+#   producao  — cotar, gerar, acompanhar e montar: uma por vez, porque mexem no plano e no dinheiro
+#   conversa  — o turno de IA: um por vez, e nunca bloqueado pelas outras faixas
+FAIXAS = {"midia": 3, "voz": 1, "producao": 1, "conversa": 1}
+FAIXA_OCUPADA = {
+    "midia": "Já há três imagens sendo geradas nesta produção. Espere uma terminar.",
+    "voz": "A narração já está sendo gerada. Espere ela terminar.",
+    "producao": "Esta produção já está cotando, gerando ou montando. Espere essa etapa terminar.",
+    "conversa": "Esta conversa já está respondendo. Aguarde a resposta atual.",
+}
+
 
 class Asset(BaseModel):
     pasta: Literal["persona", "base", "pecas", "cenarios", "movimentos", "saida", "anexos", "quadros", "referencias"]
@@ -263,7 +277,8 @@ class Processo:
         self.rascunhos: dict[str, str] = {}
         self.cli = cli or Dreamina()
         self.lock = threading.RLock()
-        self.busy: set[str] = set()
+        # produção -> {id do trabalho: {"faixa", "rotulo", "iniciado"}}. Substitui o antigo cadeado único.
+        self.trabalhos: dict[str, dict[str, dict]] = {}
         self.chatting: dict[str, int] = {}
         self.migrar()
         example_file = root / "exemplos" / "producao-v7.json"
@@ -345,10 +360,11 @@ class Processo:
             payload.append({"master_sha256": sha256(self.asset(p["master"]))})
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
-    def save_plan(self, p: dict, plan: dict, expected: int, interno: bool = False) -> dict:
-        # interno: chamado pela própria operação em segundo plano (ex.: imagem gerada virando quadro), que é quem está ocupando
-        if not interno and (p["id"] in self.busy or (p["id"] in self.chatting and self.chatting[p["id"]] != threading.get_ident())):
-            raise ValueError("Aguarde a operação atual terminar antes de alterar o plano.")
+    def save_plan(self, p: dict, plan: dict, expected: int) -> dict:
+        # Só a faixa de produção impede: cotação, geração paga, acompanhamento e montagem dependem deste plano.
+        # Imagem, Pinterest e narração correm em paralelo e não têm por que travar uma edição de estrutura.
+        self.exigir_livre(p["id"])
+        base = {k: p.get(k) for k in CAMPOS_PLANO}  # o plano como quem chamou leu, para detectar conflito real
         plan = dict(plan)
         if not plan.get("layout"):
             plan["layout"] = layout_de(p)
@@ -388,12 +404,16 @@ class Processo:
                 raise ValueError("Não remova tomadas enviadas: elas guardam a identidade e o custo da geração.")
             p["cotacao"] = p["autorizacao"] = None
         p.update(validated)
-        return self.store.save(p, expected)
+        def aplicar(atual: dict) -> dict:
+            # Conflito é o PLANO ter mudado, não a conversa ter escrito: uma imagem pronta no meio da
+            # edição não invalida mais a edição.
+            if expected is not None and any(atual.get(k) != base.get(k) for k in CAMPOS_PLANO):
+                raise ValueError("A produção mudou em outra janela. Recarregue antes de salvar.")
+            return {**p, "mensagens": atual["mensagens"]}
+        return self.store.update(p["id"], aplicar)
 
     def message(self, id: str, request: Mensagem) -> dict:
         p = self.store.get(id)
-        if id in self.busy:
-            raise ValueError("Uma operação está em andamento. Aguarde para continuar esta conversa.")
         if request.selecao:
             p = self.select_reference(id, request.selecao)
         text = request.texto.strip() or ("Escolhi " + request.selecao.asset.nome if request.selecao else "")
@@ -403,17 +423,15 @@ class Processo:
         if not text and not anexos:
             raise ValueError("Escreva sua ideia ou escolha uma referência.")
         user = {"id": uuid.uuid4().hex, "papel": "user", "texto": text, "criado": agora()}
+        campos: dict = {}
         if anexos:
             user["anexos"] = anexos
-            p["anexos_pendentes"] = anexos
-            p["anexos_idade"] = 0
+            campos = {"anexos_pendentes": anexos, "anexos_idade": 0}
         elif p.get("anexos_pendentes"):
             # Imagens coladas valem para a mensagem em que foram coladas e a seguinte (resposta a um quiz/pergunta)
-            p["anexos_idade"] = p.get("anexos_idade", 0) + 1
-            if p["anexos_idade"] >= 2:
-                p["anexos_pendentes"] = []
-        p["mensagens"].append(user)
-        p = self.store.save(p)
+            idade = p.get("anexos_idade", 0) + 1
+            campos = {"anexos_idade": idade, "anexos_pendentes": [] if idade >= 2 else p["anexos_pendentes"]}
+        p = self.store.update(id, lambda atual: {**atual, **campos, "mensagens": atual["mensagens"] + [user]})
         rapido = self.rota_rapida(p, text, bool(anexos))
         if rapido is not None:
             return rapido
@@ -472,6 +490,8 @@ class Processo:
     def turno_ia(self, p: dict) -> dict:
         id = p["id"]
         context, fotos = self._contexto(p)
+        # _contexto pode ter refeito a folha de quadros; isso só existe no dicionário local até gravar
+        folha = {k: p[k] for k in ("referencia_folha", "referencia_duracao") if k in p}
         library = self.library()
         instruction = (self.root / "studio" / "processo-prompt.md").read_text(encoding="utf-8")
         anexos = [self.asset(a) for a in p.get("anexos_pendentes") or []]
@@ -526,12 +546,15 @@ class Processo:
             else:  # modo antigo (sem sessão contínua)
                 bruto, meta = self.ask(completo, fotos + anexos), {"modo": "completo"}
             meta["caracteres"] = len(delta if meta.get("modo") == "delta" else completo)
+            # A resposta levou de 30 s a 10 min. Nesse tempo uma imagem ou a narração podem ter ficado
+            # prontas e escrito aqui: relê antes de aplicar, senão o turno apaga o que elas gravaram.
+            p = {**self.store.get(id), **folha}
             response = extrair_json(bruto)
             message = str(response.get("mensagem_pt", "")).strip()
             if not message:
                 raise ValueError("O OpenClaw não retornou uma mensagem.")
             if isinstance(response.get("ellie"), bool):
-                p = self.store.save(self.usar_ellie(p, response["ellie"]))
+                p = self._gravar(self.usar_ellie(p, response["ellie"]))
             if response.get("plano"):
                 p = self.save_plan(p, response["plano"], p["versao"])
             texto_mudou = False
@@ -557,7 +580,6 @@ class Processo:
                 cards = [c for c in cards if c.get("tipo") != "narracao"]
             resposta = {"id": uuid.uuid4().hex, "papel": "assistant", "texto": message, "blocos": cards,
                         "criado": agora(), "ia": meta}
-            p["mensagens"].append(resposta)
             p["erro"] = ""
             # O que a IA já viu: o estado DEPOIS da resposta dela (o plano que ela mesma propôs não precisa voltar)
             depois, _ = self._contexto(p)
@@ -566,9 +588,11 @@ class Processo:
                               "ultima_msg": resposta["id"],
                               "anexos": [a["nome"] for a in p.get("anexos_pendentes") or []]}
             self.store.event(id, "turno_ia", meta)
-            p = self.store.save(p)
+            p = self._gravar(p, [resposta])
             if response.get("acao") == "montar" and p["tomadas"] and all(s.get("arquivo") for s in p["tomadas"]):
-                p = self.render(id)
+                # Montagem é ffmpeg: vai para a faixa de produção em vez de segurar a conversa até o fim
+                self.background(id, self._montar, faixa="producao", rotulo="Montando o vídeo")
+                return self.com_estado(self.store.get(id))
             elif response.get("acao") == "buscar_referencias" and isinstance(response.get("busca"), dict):
                 busca = response["busca"]
                 termo = str(busca.get("termo", "")).strip()[:120]
@@ -582,11 +606,13 @@ class Processo:
                 return self.pedir_imagem(p, destino, str(pedido.get("prompt", ""))[:1200], refs,
                                          bool(pedido.get("usar_ellie")), aviso=False)
         except Exception as e:
-            p["erro"] = "Não consegui continuar pelo OpenClaw. Confira a conexão e a assinatura.\n" + str(e).replace(" | ", "\n")[:1500]
-            p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "assistant", "texto": p["erro"], "blocos": [{"tipo": "conexao"}], "criado": agora()})
+            erro = "Não consegui continuar pelo OpenClaw. Confira a conexão e a assinatura.\n" + str(e).replace(" | ", "\n")[:1500]
+            aviso = {"id": uuid.uuid4().hex, "papel": "assistant", "texto": erro, "blocos": [{"tipo": "conexao"}], "criado": agora()}
+            return self.store.update(id, lambda atual: {**atual, "erro": erro,
+                                                        "mensagens": atual["mensagens"] + [aviso]})
         finally:
             self.rascunhos.pop(id, None)
-        return self.store.save(p)
+        return p
 
     def _ao_delta(self, id: str, texto: str, substituir: bool):
         self.rascunhos[id] = texto if substituir else self.rascunhos.get(id, "") + texto
@@ -605,11 +631,17 @@ class Processo:
         except ValueError:
             return parcial.replace("\\n", "\n").replace('\\"', '"')
 
-    def responder(self, p: dict, texto: str, blocos: list | None = None) -> dict:
-        p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "assistant", "texto": texto,
-                               "blocos": blocos or [], "criado": agora(), "local": True})
-        p["erro"] = ""
-        return self.store.save(p)
+    def responder(self, p: dict | str, texto: str, blocos: list | None = None, mudar=None) -> dict:
+        """Acrescenta a resposta ao registro FRESCO: outra faixa pode ter escrito enquanto esta esperava.
+
+        `mudar` aplica as demais alterações dentro da mesma transação (nada se perde entre as duas)."""
+        mensagem = {"id": uuid.uuid4().hex, "papel": "assistant", "texto": texto,
+                    "blocos": blocos or [], "criado": agora(), "local": True}
+        id = p if isinstance(p, str) else p["id"]
+        def aplicar(atual: dict) -> dict:
+            atual = mudar(atual) if mudar else atual
+            return {**atual, "mensagens": atual["mensagens"] + [mensagem], "erro": ""}
+        return self.store.update(id, aplicar)
 
     def rota_rapida(self, p: dict, text: str, colou_agora: bool) -> dict | None:
         """Resolve sem IA o que for óbvio: destino de imagem colada, variação da última imagem, ou quiz de 1 clique."""
@@ -623,9 +655,9 @@ class Processo:
             if destino == "usar_quadro":
                 return self.usar_como_quadro(p, pendentes[0])
             if destino == "guardar":
-                p["anexos_pendentes"] = []
                 nomes = ", ".join(a["nome"] for a in pendentes)
-                return self.responder(p, f"Guardei na biblioteca, em anexos: {nomes}.")
+                return self.responder(p, f"Guardei na biblioteca, em anexos: {nomes}.",
+                                      mudar=lambda atual: {**atual, "anexos_pendentes": []})
             if destino:
                 escolha = text in OPCOES_IMAGEM_ELLIE or text in OPCOES_IMAGEM_LIVRE
                 return self.pedir_imagem(p, destino, "" if escolha else text, pendentes,
@@ -655,14 +687,21 @@ class Processo:
             return self.responder(p, "A geração de imagem não está ligada neste servidor.")
         rotulo = {"cenarios": "o cenário", "pecas": "a roupa", "base": "a Ellie com essa roupa", "persona": "a imagem",
                   "quadros": "o quadro inicial"}[pasta]
-        p["ultimo_pedido_imagem"] = {"pasta": pasta, "descricao": descricao, "referencias": refs, "usar_ellie": usar_ellie}
-        p["anexos_pendentes"] = []
+        try:  # reserva a vaga ANTES de avisar, para não prometer no chat uma imagem que não começou
+            job = self._abrir_trabalho(p["id"], "midia", f"Gerando {rotulo}")
+        except ValueError as e:
+            return self.responder(p, str(e))
+        campos = {"ultimo_pedido_imagem": {"pasta": pasta, "descricao": descricao, "referencias": refs,
+                                           "usar_ellie": usar_ellie},
+                  "anexos_pendentes": []}
+        aplicar = lambda atual: {**atual, **campos}
         if aviso:
-            p = self.responder(p, f"Gerando {rotulo} com o GPT Image. Leva de 30 s a 1,5 min; o resultado aparece aqui.")
+            p = self.responder(p, f"Gerando {rotulo} com o GPT Image. Leva de 30 s a 1,5 min; o resultado aparece aqui. "
+                                  "Pode continuar falando comigo enquanto isso.", mudar=aplicar)
         else:
-            p = self.store.save(p)
-        self.background(p["id"], self._gerar_imagem, pasta, descricao, refs, usar_ellie, do_chat=True)
-        return {**self.store.get(p["id"]), "ocupado": True}
+            p = self.store.update(p["id"], aplicar)
+        self.background(p["id"], self._gerar_imagem, pasta, descricao, refs, usar_ellie, faixa="midia", job=job)
+        return self.com_estado(self.store.get(p["id"]))
 
     def _gerar_imagem(self, id: str, pasta: str, descricao: str, refs: list[dict], usar_ellie: bool):
         caminhos = [self.asset(a) for a in refs]
@@ -670,44 +709,45 @@ class Processo:
             nome = self.imagem(pasta, descricao, "", caminhos, usar_ellie)
         except Exception as e:
             detalhe = getattr(e, "detail", None) or str(e)
-            p = self.store.get(id)
-            self.responder(p, f"A imagem não saiu: {str(detalhe)[:300]}. Peça de novo quando quiser.", [{"tipo": "conexao"}])
+            self.responder(id, f"A imagem não saiu: {str(detalhe)[:300]}. Peça de novo quando quiser.", [{"tipo": "conexao"}])
             return
-        p = self.store.get(id)
         self.store.event(id, "imagem_gerada", {"pasta": pasta, "nome": nome, "referencias": [a["nome"] for a in refs]})
+        cartao = [{"tipo": "imagem", "titulo": "", "pasta": pasta, "nomes": [nome], "gerada": True}]
         # Só o que o próprio sistema gerou pode ser descartado (nunca a modelo aprovada ou arquivos do Breno)
-        p.setdefault("geradas", []).append({"pasta": pasta, "nome": nome})
+        gerada = {"pasta": pasta, "nome": nome}
+        self.store.update(id, lambda atual: {**atual, "geradas": (atual.get("geradas") or []) + [gerada]})
         if pasta == "quadros":
             try:
-                p = self._definir_quadro(p, {"pasta": pasta, "nome": nome}, interno=True)
+                self._com_retentativa(id, lambda atual: self._definir_quadro(atual, gerada))
             except ValueError as e:  # a imagem existe: avisa em vez de sumir com o resultado
-                p = self.store.get(id)
-                self.responder(p, f"A imagem ficou pronta, mas não entrou como quadro: {e}",
-                               [{"tipo": "imagem", "titulo": "", "pasta": pasta, "nomes": [nome], "gerada": True}])
+                self.responder(id, f"A imagem ficou pronta, mas não entrou como quadro: {e}", cartao)
                 return
-        self.responder(p, "Pronto. Se não ficou bom, peça outra versão ou descarte.",
-                       [{"tipo": "imagem", "titulo": "", "pasta": pasta, "nomes": [nome], "gerada": True}])
+        self.responder(id, "Pronto. Se não ficou bom, peça outra versão ou descarte.", cartao)
 
     # ---------------- Referências do Pinterest ----------------
     def buscar_referencias(self, p: dict, termo: str, quantidade: int = 10, aviso: bool = True) -> dict:
         quantidade = max(1, min(16, quantidade))
+        try:
+            job = self._abrir_trabalho(p["id"], "midia", f"Buscando “{termo}” no Pinterest")
+        except ValueError as e:
+            return self.responder(p, str(e))
         if aviso:
-            p = self.responder(p, f"Buscando “{termo}” no Pinterest. Leva uns 20 a 60 s; as imagens aparecem aqui.")
-        self.background(p["id"], self._buscar_referencias, termo, quantidade, do_chat=True)
-        return {**self.store.get(p["id"]), "ocupado": True}
+            p = self.responder(p, f"Buscando “{termo}” no Pinterest. Leva uns 20 a 60 s; as imagens aparecem aqui. "
+                                  "Pode seguir conversando enquanto isso.")
+        self.background(p["id"], self._buscar_referencias, termo, quantidade, faixa="midia", job=job)
+        return self.com_estado(self.store.get(p["id"]))
 
     def _buscar_referencias(self, id: str, termo: str, quantidade: int):
         try:
             nomes = self.pinterest(termo, self.root / "referencias", quantidade)
         except Exception as e:
-            self.responder(self.store.get(id), f"A busca no Pinterest não deu certo: {str(e)[:300]}")
+            self.responder(id, f"A busca no Pinterest não deu certo: {str(e)[:300]}")
             return
-        p = self.store.get(id)
         self.store.event(id, "pinterest", {"termo": termo, "imagens": len(nomes)})
         if not nomes:
-            self.responder(p, f"O Pinterest não devolveu imagens para “{termo}”. Tente outro termo (em inglês costuma render mais).")
+            self.responder(id, f"O Pinterest não devolveu imagens para “{termo}”. Tente outro termo (em inglês costuma render mais).")
             return
-        self.responder(p, f"{len(nomes)} referências do Pinterest para “{termo}”. Escolha uma para virar quadro inicial "
+        self.responder(id, f"{len(nomes)} referências do Pinterest para “{termo}”. Escolha uma para virar quadro inicial "
                           "ou para o GPT recriar.", [{"tipo": "imagem", "titulo": "", "pasta": "referencias", "nomes": nomes,
                                                      "referencias": True, "termo": termo}])
 
@@ -720,7 +760,7 @@ class Processo:
         return self.pedir_imagem(p, "quadros", "Recreate this reference as an original cinematic vertical 9:16 first frame. "
                                  "Keep the mood, composition and light; do not copy watermarks or text.", [asset], False)
 
-    def _definir_quadro(self, p: dict, asset: dict, interno: bool = False) -> dict:
+    def _definir_quadro(self, p: dict, asset: dict) -> dict:
         """Coloca a imagem como quadro inicial: na primeira tomada ainda sem imagem, senão substitui a da última
         tomada não enviada; sem tomada disponível, abre uma cena nova (invalida cotação antiga, se houver)."""
         plano = {k: p.get(k) for k in CAMPOS_PLANO}
@@ -745,7 +785,7 @@ class Processo:
                     plano["cortes"] = list(plano["cortes"]) + [{"tomada": f"cena-{n}", "inicio": 0, "duracao": 10, "recorte": None}]
                     plano["duracao_final"] = int(plano["duracao_final"]) + 10
         plano["tomadas"] = tomadas
-        return self.save_plan(p, plano, p["versao"], interno=interno)
+        return self.save_plan(p, plano, p["versao"])
 
     def usar_como_quadro(self, p: dict, asset: dict) -> dict:
         p["anexos_pendentes"] = []
@@ -766,16 +806,21 @@ class Processo:
         if destino.exists():
             destino = lixeira / f"{path.stem}-{uuid.uuid4().hex[:6]}{path.suffix}"
         path.replace(destino)
-        p = self.store.get(id)
-        p["anexos_pendentes"] = [a for a in p.get("anexos_pendentes") or [] if a != asset]
-        for m in p["mensagens"]:
-            for b in m.get("blocos") or []:
-                if b.get("tipo") == "imagem" and b.get("pasta") == asset["pasta"] and asset["nome"] in (b.get("nomes") or []):
-                    b["descartado"] = True
-            if asset in (m.get("anexos") or []):
-                m["anexos"] = [a for a in m["anexos"] if a != asset]
+        def aplicar(atual: dict) -> dict:
+            # Marca o descarte nas mensagens FRESCAS: outra faixa pode ter escrito enquanto o arquivo ia pra lixeira
+            mensagens = []
+            for m in atual["mensagens"]:
+                m = dict(m)
+                for b in m.get("blocos") or []:
+                    if b.get("tipo") == "imagem" and b.get("pasta") == asset["pasta"] and asset["nome"] in (b.get("nomes") or []):
+                        b["descartado"] = True
+                if asset in (m.get("anexos") or []):
+                    m["anexos"] = [a for a in m["anexos"] if a != asset]
+                mensagens.append(m)
+            return {**atual, "mensagens": mensagens,
+                    "anexos_pendentes": [a for a in atual.get("anexos_pendentes") or [] if a != asset]}
         self.store.event(id, "descartado", asset)
-        return self.store.save(p)
+        return self.store.update(id, aplicar)
 
     # ---------------- Narração (formato narrado) ----------------
     def gerar_narracao(self, id: str, pedido: Narracao) -> None:
@@ -786,33 +831,41 @@ class Processo:
             raise ValueError("Escreva o texto da narração.")
         nome = f"narracao-{uuid.uuid4().hex[:6]}.mp3"
         palavras = gerar_elevenlabs(texto, self.output(id) / nome, pedido.voz)
-        p = self.store.get(id)
-        p["narracao"] = {**NARRACAO_VAZIA, **(p.get("narracao") or {}), "texto": texto, "voz": pedido.voz, "setas": pedido.setas,
-                         "audio": nome, "palavras": palavras, "origem": "elevenlabs"}
-        if pedido.cta.strip():
-            p["narracao"]["cta"] = pedido.cta.strip()
+        cta = pedido.cta.strip()
+        def gravar(atual: dict) -> dict:
+            narracao = {**NARRACAO_VAZIA, **(atual.get("narracao") or {}), "texto": texto, "voz": pedido.voz,
+                        "setas": pedido.setas, "audio": nome, "palavras": palavras, "origem": "elevenlabs"}
+            if cta:
+                narracao["cta"] = cta
+            return {**atual, "narracao": narracao}
         self.store.event(id, "narracao", {"origem": "elevenlabs", "palavras": len(palavras)})
-        self.responder(p, f"Voz pronta ({len(palavras)} palavras). Ouça no cartão da narração.", [{"tipo": "narracao"}])
+        self.responder(id, f"Voz pronta ({len(palavras)} palavras). Ouça no cartão da narração.",
+                       [{"tipo": "narracao"}], mudar=gravar)
 
     def salvar_audio_narracao(self, id: str, origem: Path, texto: str, setas: bool) -> None:
         from studio.narracao import alinhar_arquivo
         palavras = alinhar_arquivo(origem, texto)
-        p = self.store.get(id)
-        p["narracao"] = {**NARRACAO_VAZIA, **(p.get("narracao") or {}), "texto": texto or " ".join(w["p"] for w in palavras),
-                         "setas": setas, "audio": origem.name, "palavras": palavras, "origem": "arquivo"}
+        def gravar(atual: dict) -> dict:
+            return {**atual, "narracao": {**NARRACAO_VAZIA, **(atual.get("narracao") or {}),
+                                          "texto": texto or " ".join(w["p"] for w in palavras), "setas": setas,
+                                          "audio": origem.name, "palavras": palavras, "origem": "arquivo"}}
         self.store.event(id, "narracao", {"origem": "arquivo", "palavras": len(palavras)})
-        self.responder(p, f"Áudio recebido e sincronizado ({len(palavras)} palavras).", [{"tipo": "narracao"}])
+        self.responder(id, f"Áudio recebido e sincronizado ({len(palavras)} palavras).",
+                       [{"tipo": "narracao"}], mudar=gravar)
 
     def chat(self, id: str, request: Mensagem) -> dict:
+        """A conversa tem faixa própria: imagem, voz ou montagem em andamento não impedem falar."""
         with self.lock:
-            if id in self.busy or id in self.chatting:
-                raise ValueError("Esta conversa já está processando um pedido.")
+            if id in self.chatting:
+                raise ValueError(FAIXA_OCUPADA["conversa"])
+            job = self._abrir_trabalho(id, "conversa", "Pensando na resposta")
             self.chatting[id] = threading.get_ident()
         try:
             return self.message(id, request)
         finally:
             with self.lock:
                 self.chatting.pop(id, None)
+            self._fechar_trabalho(id, job)
 
     @staticmethod
     def cards(values: list, library: dict) -> list[dict]:
@@ -867,11 +920,11 @@ class Processo:
         fingerprint = self.generation_hash(p)
         if not p["canvas_id"]:
             p["canvas_id"] = str(uuid.uuid4())
-            p = self.store.save(p)
+            p = self._gravar(p)
         if not p.get("canvas_url"):
             created = self.cli.canvas(p["canvas_id"], p["nome"])
             p["canvas_url"] = created.get("webUrl", "")
-            p = self.store.save(p)
+            p = self._gravar(p)
 
         def imported(path: Path, media: str) -> str:
             kind = "external_generated" if media == "image" else "local_upload"
@@ -879,20 +932,20 @@ class Processo:
             item = p["imports"].setdefault(key, {"resource": str(uuid.uuid4()), "submit": str(uuid.uuid4())})
             if not item.get("imported"):
                 item.pop("node", None)  # IDs inventados por versões antigas eram recusados pela CLI
-            self.store.save(p)
+            self._gravar(p)
             if not item.get("uploaded"):
                 result = self.cli.upload(path, p["canvas_id"], item["resource"], kind)
                 if result.get("resourceId") != item["resource"]:
                     raise ValueError("O upload não corresponde à referência planejada.")
                 item["uploaded"] = True
-                self.store.save(p)
+                self._gravar(p)
             if not item.get("imported"):
                 criado = self.cli.import_node(media, item["resource"], None, p["canvas_id"], item["submit"], path.stem, kind)
                 item["node"] = Dreamina.node_id(criado)
                 if not item["node"]:
                     raise ValueError("A CLI criou a referência mas não devolveu o node_id. Resposta: " + json.dumps(criado)[:300])
                 item["imported"] = True
-                self.store.save(p)
+                self._gravar(p)
             return item["node"]
 
         for shot in pending:
@@ -913,7 +966,7 @@ class Processo:
                     raise ValueError("A CLI criou a tomada mas não devolveu o node_id. Resposta: " + json.dumps(criado)[:300])
                 shot["node_id_cli"] = True
             shot["estado"] = "rascunho"
-            self.store.save(p)
+            self._gravar(p)
         quote = self.cli.quote(p["canvas_id"], [s["node_id"] for s in pending])
         p["cotacao"] = {"id": uuid.uuid4().hex, "hash": fingerprint, "criado": agora(), "draft_version": quote.get("draftVersion"),
                          "total": quote["totalMaxCredits"], "itens": quote["items"], "tomadas": [s['id'] for s in pending], "unidade": "creditos_dreamina"}
@@ -921,7 +974,7 @@ class Processo:
         p["status"] = "orcamento"
         p["erro"] = ""
         self.store.event(id, "cotacao", {"total": quote["totalMaxCredits"], "hash": fingerprint})
-        return self.store.save(p)
+        return self._gravar(p)
 
     def generate(self, id: str, request: Gerar) -> dict:
         p = self.store.get(id)
@@ -950,7 +1003,7 @@ class Processo:
             shot["reserva_creditos"] = quoted[shot["node_id"]]
         p["status"] = "gerando"
         q["executada"] = True
-        self.store.save(p)  # Identidade e reserva existem ANTES da chamada que pode gastar.
+        self._gravar(p)  # Identidade e reserva existem ANTES da chamada que pode gastar.
         self.store.event(id, "autorizacao", {"teto": request.teto, "cotacao_id": q["id"]})
         try:
             self.cli.run(p["canvas_id"], pending, request.teto)
@@ -960,7 +1013,7 @@ class Processo:
         except Exception:
             p["status"] = "envio_incerto"
             p["erro"] = "O envio não foi confirmado. Os identificadores estão preservados. Use Acompanhar; não gerar novamente."
-        return self.store.save(p)
+        return self._gravar(p)
 
     def sync(self, id: str) -> dict:
         p = self.store.get(id)
@@ -982,7 +1035,7 @@ class Processo:
                     raise ValueError("O recurso retornado ainda não é um vídeo concluído.")
                 if isinstance(facts.get("creditsAmount"), (int, float)):
                     shot["creditos_registrados"] = facts["creditsAmount"]
-                self.store.save(p)
+                self._gravar(p)
                 filename = f"{id[:12]}-{shot['id']}.mp4"
                 dest = self.root / "saida" / filename
                 partial = dest.with_name(dest.stem + ".download.mp4")
@@ -995,11 +1048,11 @@ class Processo:
                 data = probe(dest)
                 shot.update(arquivo={"pasta": "saida", "nome": filename}, sha256=sha256(dest), estado="baixado", info=data)
                 p["erro"] = ""
-            self.store.save(p)
-        self._avisar_tomadas(p, prontas_antes, falhas_antes)
+            self._gravar(p)
+        avisos = self._avisar_tomadas(p, prontas_antes, falhas_antes)
         if all(s.get("arquivo") for s in p["tomadas"]):
             p["status"] = "pronto_para_montar"
-            self.store.save(p)
+            p = self._gravar(p, avisos)
             if self._falta_voz(p):
                 return p  # monta quando a voz estiver pronta
             return self.render(id)
@@ -1008,14 +1061,17 @@ class Processo:
             p["erro"] = "Uma tomada não concluiu. Os resultados e custos conhecidos foram preservados. Nenhuma repetição foi feita; estorno ainda não foi confirmado."
         elif not any(s.get("submit_id") and not s.get("arquivo") for s in p["tomadas"]):
             p["status"] = "proxima_tomada"
-        return self.store.save(p)
+        return self._gravar(p, avisos)
 
-    def _avisar_tomadas(self, p: dict, prontas_antes: set, falhas_antes: set):
-        """Avisa no chat, sem IA, quando uma tomada fica pronta ou falha, com o cartão de produção atualizado."""
+    def _avisar_tomadas(self, p: dict, prontas_antes: set, falhas_antes: set) -> list[dict]:
+        """Monta o aviso de chat, sem IA, quando uma tomada fica pronta ou falha, com o cartão de produção atualizado.
+
+        Devolve as mensagens em vez de gravar: quem grava é o `_gravar` do `sync`, que junta o que a
+        conversa escreveu em paralelo."""
         novas = [s for s in p["tomadas"] if s.get("arquivo") and s["id"] not in prontas_antes]
         falhas = [s for s in p["tomadas"] if s.get("estado") in ("failed", "canceled", "cancelled") and s["id"] not in falhas_antes]
         if not novas and not falhas:
-            return
+            return []
         faltam = [s["titulo"] for s in p["tomadas"] if not s.get("arquivo")]
         partes = []
         for s in novas:
@@ -1027,9 +1083,8 @@ class Processo:
         partes.append(("Falta: " + ", ".join(faltam) + ".") if faltam else
                       "Tomadas prontas. Falta a voz: gere ou envie no cartão da narração, depois monte." if sem_voz else
                       "Todas as tomadas estão prontas; vou montar o vídeo.")
-        p["mensagens"].append({"id": uuid.uuid4().hex, "papel": "assistant", "texto": " ".join(partes),
-                               "blocos": [{"tipo": "custo", "titulo": "Produção das tomadas"}], "criado": agora(), "local": True})
-        self.store.save(p)
+        return [{"id": uuid.uuid4().hex, "papel": "assistant", "texto": " ".join(partes),
+                 "blocos": [{"tipo": "custo", "titulo": "Produção das tomadas"}], "criado": agora(), "local": True}]
 
     def reuse(self, p: dict, id: str, asset: dict) -> dict:
         path = self.asset(asset)
@@ -1041,12 +1096,11 @@ class Processo:
             raise ValueError("Esta tomada tem envio remoto. Use Acompanhar para recuperar o próprio resultado.")
         shot.update(arquivo=asset, estado="reaproveitado", info=info, sha256=sha256(path))
         p["cotacao"] = p["autorizacao"] = None
-        return self.store.save(p)
+        return self._gravar(p)
 
     def select_reference(self, id: str, selection: Selecao) -> dict:
         p = self.store.get(id)
-        if id in self.busy or (id in self.chatting and self.chatting[id] != threading.get_ident()):
-            raise ValueError("Aguarde a operação atual.")
+        self.exigir_livre(id)
         value = selection.asset.model_dump()
         path = self.asset(value)
         if selection.papel == "bruto":
@@ -1074,7 +1128,7 @@ class Processo:
                 if value not in shot["imagens"]:
                     shot["imagens"].append(value)
         p["cotacao"] = p["autorizacao"] = None
-        return self.store.save(p)
+        return self._gravar(p)
 
     @staticmethod
     def _falta_voz(p: dict) -> bool:
@@ -1106,26 +1160,80 @@ class Processo:
         p["status"] = "concluido"
         p["erro"] = ""
         self.store.event(id, "montagem_local", {"arquivo": result["nome"] if "nome" in result else Path(result["caminho"]).name, "creditos": 0})
-        return self.store.save(p)
+        return self._gravar(p)
 
-    def background(self, id: str, function, *args, do_chat: bool = False):
+    def _montar(self, id: str) -> None:
+        """Montagem pedida pela conversa: corre na faixa de produção e conta o resultado no chat."""
+        try:
+            self.render(id)
+        except (ValueError, RuntimeError, OSError) as e:
+            self.responder(id, f"Não consegui montar agora: {str(e)[:300]}")
+            return
+        self.responder(id, "Vídeo montado. Está aí embaixo.", [{"tipo": "resultado", "titulo": "Seu vídeo"}])
+
+    # ---------------- Faixas de trabalho ----------------
+    def _abrir_trabalho(self, id: str, faixa: str, rotulo: str) -> str:
+        """Reserva vaga na faixa. Só conflita com trabalhos do mesmo tipo; as outras faixas seguem livres."""
         with self.lock:
-            # do_chat: disparado de dentro do próprio turno de conversa (que ainda segura self.chatting)
-            if id in self.busy or (id in self.chatting and not do_chat):
-                raise ValueError("Esta produção já está processando uma operação.")
-            self.busy.add(id)
+            jobs = self.trabalhos.get(id, {})
+            if sum(1 for j in jobs.values() if j["faixa"] == faixa) >= FAIXAS[faixa]:
+                raise ValueError(FAIXA_OCUPADA[faixa])
+            job = uuid.uuid4().hex[:8]
+            self.trabalhos.setdefault(id, {})[job] = {"id": job, "faixa": faixa, "rotulo": rotulo, "iniciado": agora()}
+            return job
+
+    def _fechar_trabalho(self, id: str, job: str) -> None:
+        with self.lock:
+            self.trabalhos.get(id, {}).pop(job, None)
+            if not self.trabalhos.get(id):
+                self.trabalhos.pop(id, None)
+
+    def ocupado(self, id: str, faixa: str | None = None) -> bool:
+        jobs = self.trabalhos.get(id, {})
+        return any(j["faixa"] == faixa for j in jobs.values()) if faixa else bool(jobs)
+
+    def em_andamento(self, id: str) -> list[dict]:
+        return sorted(self.trabalhos.get(id, {}).values(), key=lambda j: j["iniciado"])
+
+    def com_estado(self, p: dict) -> dict:
+        """Produção com o que está correndo agora: a interface usa isto para mostrar os avisos sem travar o chat."""
+        return {**p, "ocupado": self.ocupado(p["id"]), "trabalhos": self.em_andamento(p["id"])}
+
+    def _gravar(self, p: dict, mensagens: list | None = None) -> dict:
+        """Grava uma operação longa sem apagar o que a conversa escreveu no meio dela.
+
+        A operação é dona de todos os campos menos a lista de mensagens: essa vem do registro fresco,
+        e só as mensagens novas desta operação são acrescentadas."""
+        novas = mensagens or []
+        return self.store.update(p["id"], lambda atual: {**p, "mensagens": atual["mensagens"] + novas})
+
+    def _com_retentativa(self, id: str, operacao, tentativas: int = 3):
+        """Repete quando outra faixa gravou no meio: com paralelismo, a versão do plano pode virar entre ler e salvar."""
+        for restantes in range(tentativas - 1, -1, -1):
+            try:
+                return operacao(self.store.get(id))
+            except ValueError as e:
+                if not restantes or "mudou em outra janela" not in str(e):
+                    raise
+
+    def exigir_livre(self, id: str, faixa: str = "producao") -> None:
+        """Guarda das alterações de plano: só a faixa de produção impede mexer (cotação e geração dependem do plano)."""
+        if self.ocupado(id, faixa):
+            raise ValueError(FAIXA_OCUPADA[faixa])
+
+    def background(self, id: str, function, *args, faixa: str = "producao", rotulo: str = "", job: str | None = None):
+        # job: vaga já reservada por quem chamou (para só avisar no chat depois de saber que cabe)
+        job = job or self._abrir_trabalho(id, faixa, rotulo or faixa)
         def work():
             try:
                 function(id, *args)
             except Exception as e:
-                p = self.store.get(id)
-                p["erro"] = str(e)[:800]
-                self.store.save(p)
+                erro = str(e)[:800]
+                self.store.update(id, lambda atual: {**atual, "erro": erro})
             finally:
-                with self.lock:
-                    self.busy.discard(id)
+                self._fechar_trabalho(id, job)
         threading.Thread(target=work, daemon=True).start()
-        return {"iniciado": True, "id": id}
+        return {"iniciado": True, "id": id, "trabalho": job, "faixa": faixa}
 
 
 def achar_openclaw() -> str | None:
@@ -1187,11 +1295,15 @@ def create_router(root: Path, ask, imagem=None, conversar=None) -> APIRouter:
         except ValueError as e:
             raise HTTPException(404, str(e)) from None
 
-    def safe(function, *args):
+    def safe(function, *args, **kwargs):
         try:
-            return function(*args)
+            return function(*args, **kwargs)
         except (ValueError, RuntimeError, OSError) as e:
             raise HTTPException(400, str(e)) from None
+
+    def estado(p: dict) -> dict:
+        """Toda rota que devolve a produção diz também o que está correndo, para a interface mostrar sem travar."""
+        return service.com_estado(p)
 
     @router.get("/status")
     def status():
@@ -1242,23 +1354,24 @@ def create_router(root: Path, ask, imagem=None, conversar=None) -> APIRouter:
 
     @router.get("/ocupado")
     def busy():
-        """Usado pelo supervisor: só reinicia o servidor quando nada está em andamento."""
-        return {"ocupado": bool(service.busy or service.chatting),
-                "operacoes": sorted(service.busy | set(service.chatting))}
+        """Usado pelo supervisor: só reinicia o servidor quando nada está em andamento (qualquer faixa)."""
+        return {"ocupado": bool(service.trabalhos), "operacoes": sorted(service.trabalhos),
+                "faixas": {id: [j["faixa"] for j in jobs.values()] for id, jobs in service.trabalhos.items()}}
 
     @router.get("/{id}/rascunho")
     def draft(id: str):
-        return {"texto": service.rascunho(id), "pensando": id in service.chatting}
+        return {"texto": service.rascunho(id), "pensando": id in service.chatting,
+                "trabalhos": service.em_andamento(id)}
 
     @router.post("/{id}/usar-imagem")
     def use_image(id: str, request: UsarImagem):
         get(id)
-        return safe(service.usar_imagem, id, request)
+        return estado(safe(service.usar_imagem, id, request))
 
     @router.post("/{id}/descartar")
     def discard(id: str, request: Descartar):
         get(id)
-        return safe(service.descartar, id, request.asset.model_dump())
+        return estado(safe(service.descartar, id, request.asset.model_dump()))
 
     @router.get("")
     def list_productions():
@@ -1276,7 +1389,7 @@ def create_router(root: Path, ask, imagem=None, conversar=None) -> APIRouter:
     @router.post("/{id}/narracao")
     def narration(id: str, request: Narracao):
         get(id)
-        return safe(service.background, id, service.gerar_narracao, request)
+        return safe(service.background, id, service.gerar_narracao, request, faixa="voz", rotulo="Gerando a voz")
 
     @router.post("/{id}/narracao/arquivo")
     async def narration_file(id: str, arquivo: UploadFile = File(...), texto: str = Form(""), setas: bool = Form(True)):
@@ -1286,7 +1399,8 @@ def create_router(root: Path, ask, imagem=None, conversar=None) -> APIRouter:
             raise HTTPException(400, "Envie o áudio em MP3, WAV, M4A ou OGG.")
         dest = service.output(id) / f"narracao-{uuid.uuid4().hex[:6]}{nome.suffix.lower()}"
         dest.write_bytes(await arquivo.read())
-        return safe(service.background, id, service.salvar_audio_narracao, dest, texto[:800], setas)
+        return safe(service.background, id, service.salvar_audio_narracao, dest, texto[:800], setas,
+                    faixa="voz", rotulo="Sincronizando o áudio")
 
     @router.get("/{id}/narracao/audio")
     def narration_audio(id: str):
@@ -1297,49 +1411,50 @@ def create_router(root: Path, ask, imagem=None, conversar=None) -> APIRouter:
 
     @router.get("/{id}")
     def production(id: str):
-        return {**get(id), "ocupado": id in service.busy or id in service.chatting}
+        return estado(get(id))
 
     @router.put("/{id}/plano")
     def plan(id: str, request: SalvarPlano):
-        return safe(service.save_plan, get(id), request.plano.model_dump(), request.versao)
+        return estado(safe(service.save_plan, get(id), request.plano.model_dump(), request.versao))
 
     @router.post("/{id}/conversa")
     def chat(id: str, request: Mensagem):
         get(id)
-        return safe(service.chat, id, request)
+        return estado(safe(service.chat, id, request))
 
     @router.post("/{id}/referencia")
     def reference(id: str, request: Selecao):
         get(id)
-        return safe(service.select_reference, id, request)
+        return estado(safe(service.select_reference, id, request))
 
     @router.post("/{id}/cotar")
     def quote(id: str, request: Cotar = Cotar()):
         get(id)
-        return safe(service.background, id, service.prepare_quote, request.tomadas)
+        return safe(service.background, id, service.prepare_quote, request.tomadas,
+                    faixa="producao", rotulo="Calculando o custo")
 
     @router.post("/{id}/gerar")
     def generate(id: str, request: Gerar, http: Request):
         get(id)
         if http.headers.get("X-Estudio-Humano") != "sim":
             raise HTTPException(403, "A geração paga precisa do botão de aprovação do Estúdio.")
-        return safe(service.background, id, service.generate, request)
+        return safe(service.background, id, service.generate, request,
+                    faixa="producao", rotulo="Enviando as tomadas")
 
     @router.post("/{id}/acompanhar")
     def sync(id: str):
         get(id)
-        return safe(service.background, id, service.sync)
+        return safe(service.background, id, service.sync, faixa="producao", rotulo="Acompanhando as tomadas")
 
     @router.post("/{id}/reusar")
     def reuse(id: str, request: Reuso):
-        if id in service.busy or id in service.chatting:
-            raise HTTPException(409, "Aguarde a operação atual.")
-        return safe(service.reuse, get(id), request.tomada, request.asset.model_dump())
+        safe(service.exigir_livre, id)
+        return estado(safe(service.reuse, get(id), request.tomada, request.asset.model_dump()))
 
     @router.post("/{id}/montar")
     def render(id: str):
         get(id)
-        return safe(service.background, id, service.render)
+        return safe(service.background, id, service.render, faixa="producao", rotulo="Montando o vídeo")
 
     @router.get("/{id}/resultado")
     def result(id: str):

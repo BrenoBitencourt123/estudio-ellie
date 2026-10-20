@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { processo, urlNarracao } from '@/lib/processo'
+import { naFaixa, processo, urlNarracao } from '@/lib/processo'
 import type { Producao } from '@/types/processo'
 
 // Narração de qualquer vídeo: texto em inglês, voz do ElevenLabs (com tempo por palavra) ou áudio enviado.
@@ -18,7 +18,8 @@ export default function CartaoNarracao({ producao, atualizar }: { producao: Prod
   useEffect(() => {
     void processo.narracaoStatus().then(s => { setEleven(s.elevenlabs); if (!voz) setVoz(s.voz_padrao) }).catch(() => setEleven(false))
   }, [])
-  const ativo = busy || !!producao.ocupado
+  // Só a própria narração em curso trava este cartão; imagem e montagem seguem em paralelo
+  const ativo = busy || naFaixa(producao, 'voz')
   const palavras = texto.trim() ? texto.trim().split(/\s+/).length : 0
   const acao = async (fn: () => Promise<unknown>) => {
     setBusy(true); setErro('')

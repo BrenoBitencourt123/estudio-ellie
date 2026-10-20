@@ -21,9 +21,14 @@ export type Faixa = {
 export type Layout = 'tela_cheia' | 'lado_a_lado'
 export type PlanoProducao = { layout?: Layout; duracao_final: number; tomadas: Tomada[]; cortes: Corte[]; faixa: Faixa; legenda: string }
 export type Formato = 'duas_tomadas' | 'narrado'
+// Faixas de trabalho do servidor: cada uma corre em paralelo com as outras.
+// midia = imagem/Pinterest · voz = narração · producao = cotar/gerar/acompanhar/montar · conversa = turno de IA
+export type FaixaTrabalho = 'midia' | 'voz' | 'producao' | 'conversa'
+export type Trabalho = { id: string; faixa: FaixaTrabalho; rotulo: string; iniciado: string }
 export type Narracao = { texto: string; voz: string; setas: boolean; cta?: string; audio: string | null; palavras: { p: string; ini: number; fim: number }[]; origem?: string }
 export type Producao = PlanoProducao & {
-  id: string; nome: string; versao: number; criado: string; atualizado: string; status: string; erro: string; ocupado?: boolean
+  id: string; nome: string; versao: number; criado: string; atualizado: string; status: string; erro: string
+  ocupado?: boolean; trabalhos?: Trabalho[]
   formato?: Formato; narracao?: Narracao
   master: Midia | null; referencia: Midia | null; mensagens: MensagemChat[]; canvas_url: string
   cotacao: { id: string; total: number; itens: { nodeId: string; maxCredits: number }[]; tomadas?: string[]; executada?: boolean } | null

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import CartaoProducao from '@/components/CartaoProducao'
+import Cronometro, { duracao } from '@/components/Cronometro'
+import EtapasProducao from '@/components/EtapasProducao'
 import EdicaoConversa from '@/components/EdicaoConversa'
 import GaleriaConversa from '@/components/GaleriaConversa'
 import PlanoConversa from '@/components/PlanoConversa'
@@ -7,7 +9,7 @@ import ConversaModal from '@/components/ConversaModal'
 import { useConversa } from '@/hooks/useConversa'
 import { useAnexos } from '@/hooks/useAnexos'
 import { processo, urlMidia } from '@/lib/processo'
-import type { Bloco, MensagemChat, UsoIA } from '@/types/processo'
+import type { Bloco, MensagemChat, Trabalho, UsoIA } from '@/types/processo'
 import './conversa.css'
 
 // Linha discreta sob cada resposta: qual modelo respondeu, quanto do contexto foi enviado e quanto demorou
@@ -26,7 +28,6 @@ function medidor(ia: UsoIA) {
 
 // Hora de cada mensagem e, nas respostas, quanto tempo levou desde a mensagem anterior do Breno
 const hora = (iso: string) => new Date(iso).toLocaleTimeString('pt-BR')
-const duracao = (s: number) => s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}min ${Math.round(s % 60)}s`
 function tempoResposta(mensagens: MensagemChat[], i: number) {
   if (mensagens[i].papel !== 'assistant') return ''
   for (let j = i - 1; j >= 0; j--) {
@@ -38,10 +39,15 @@ function tempoResposta(mensagens: MensagemChat[], i: number) {
   return ''
 }
 
-function Cronometro({ desde }: { desde: number }) {
-  const [agora, setAgora] = useState(Date.now())
-  useEffect(() => { const t = setInterval(() => setAgora(Date.now()), 1000); return () => clearInterval(t) }, [])
-  return <span className="live-timer">{duracao(Math.max(0, (agora - desde) / 1000))}</span>
+// O que está sendo feito agora, em paralelo: cada faixa aparece com o próprio relógio e o chat segue livre.
+function TrabalhosEmCurso({ trabalhos }: { trabalhos: Trabalho[] }) {
+  const visiveis = trabalhos.filter(t => t.faixa !== 'conversa')
+  if (!visiveis.length) return null
+  return <div className="running-jobs" role="status" aria-live="polite">
+    {visiveis.map(t => <span key={t.id} className={`job-chip job-${t.faixa}`}>
+      <span className="job-pulse" aria-hidden="true" />{t.rotulo}… <Cronometro desde={Date.parse(t.iniciado)} />
+    </span>)}
+  </div>
 }
 
 export default function App() {
@@ -113,7 +119,8 @@ export default function App() {
     }, 4000)
     return () => clearInterval(timer)
   }, [])
-  const podeEnviar = (!!texto.trim() || colados.prontos.length > 0) && !colados.enviando && !chat.pensando && !p?.ocupado
+  // Só a resposta anterior ainda chegando impede enviar: imagem, voz e montagem correm em paralelo
+  const podeEnviar = (!!texto.trim() || colados.prontos.length > 0) && !colados.enviando && !chat.pensando
   const refs = [p?.master, p?.referencia, ...(p?.tomadas ?? []).map(s => s.imagens[0]).filter(a => a && a.pasta !== 'base')].filter(a => !!a).slice(0, 4)
   const card = (block: Bloco, key: string) => p && <CartaoProducao key={key} bloco={block} producao={p} abrir={abrir}
     responder={value => void enviar(value)} atualizar={chat.atualizar} />
@@ -150,7 +157,7 @@ export default function App() {
           {chat.pensando && (chat.aoVivo
             ? <article className="chat-message assistant live"><span className="message-author">Direção Ellie<time className="message-time"><Cronometro desde={chat.inicio} /></time></span><p>{chat.aoVivo}<span className="caret" /></p></article>
             : <p className="thinking-message" role="status">A diretora está montando a próxima parte… <Cronometro desde={chat.inicio} /></p>)}
-          {p?.ocupado && <p className="thinking-message" role="status">Processando sua produção. Pode acompanhar por aqui.</p>}
+          <TrabalhosEmCurso trabalhos={p?.trabalhos ?? []} />
           {p?.erro && !chat.pensando && <p className="error-message" role="alert">{p.erro}</p>}
           {chat.erro && <p className="error-message" role="alert">{chat.erro}</p>}
           {avisoAudio && <p className="thinking-message" role="status">{avisoAudio}</p>}
@@ -182,7 +189,9 @@ export default function App() {
           </form><p className="composer-note">Conversa pela assinatura do OpenClaw. Geração de vídeo só com seu custo aprovado.</p>
         </div>
       </section>
-      <aside className="production-context" aria-label="Contexto da produção"><span className="eyebrow">O QUE JÁ TEMOS</span>
+      <aside className="production-context" aria-label="Contexto da produção">
+        {p && <EtapasProducao producao={p} />}
+        <span className="eyebrow">O QUE JÁ TEMOS</span>
         <h2>{p ? 'Nossa base' : 'Tudo no contexto'}</h2><p>As escolhas ficam salvas junto da conversa.</p>
         {refs.map((asset, i) => <div className="context-reference" key={`${asset.pasta}-${asset.nome}`}>
           {asset.pasta === 'movimentos' ? <video src={urlMidia(asset.pasta, asset.nome)} controls preload="metadata" /> : <img src={urlMidia(asset.pasta, asset.nome)} alt="Modelo aprovada para esta produção" />}

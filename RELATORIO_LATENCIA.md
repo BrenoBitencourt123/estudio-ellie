@@ -268,3 +268,50 @@ Fim das 2 execuções falhas por hora com `heartbeat skipped: no-route`. Para re
 ### O que ficou de fora
 
 Nada das Etapas B e C foi tocado: os ~20 plugins sem uso seguem habilitados, o `thinking` segue no padrão do provedor, não há log em arquivo, o gateway não foi reiniciado e o vazamento de memória (853 MB agora) segue sem diagnóstico. O overhead de 12–21 s no handshake do CLI também permanece.
+
+---
+
+## Faixas de trabalho paralelas no Estúdio (2026-10-20)
+
+**Problema.** O Estúdio tinha um cadeado único por produção (`Processo.busy`, um `set` de ids). Qualquer
+operação em segundo plano — imagem, Pinterest, narração, cotação, geração, acompanhamento, montagem —
+ocupava esse cadeado, e `chat()` recusava a conversa enquanto ele estivesse tomado. A interface fechava o
+botão de enviar (`podeEnviar` olhava `p.ocupado`). Não era limite técnico: era política.
+
+**O que mudou.** `busy` virou um registro de trabalhos por faixa (`Processo.trabalhos`), com política por tipo:
+
+| Faixa | O que entra | Quantas ao mesmo tempo |
+|---|---|---|
+| `midia` | imagem do GPT, busca no Pinterest | 3 |
+| `voz` | ElevenLabs, sincronização de áudio enviado | 1 |
+| `producao` | cotar, gerar, acompanhar, montar | 1 (mexe no plano e no dinheiro) |
+| `conversa` | turno de IA | 1, e nunca bloqueada pelas outras |
+
+A montagem pedida pela IA (`acao: "montar"`) passou a ir para a faixa `producao` em vez de segurar o turno
+de conversa até o ffmpeg terminar.
+
+**Escrita concorrente.** Com paralelismo, o padrão `store.get()` → mudar → `store.save()` perde escrita: o
+turno de IA demora minutos e grava por cima da mensagem que a imagem escreveu no meio. Três mudanças:
+
+- `Store.update(id, mudar)` faz ler-mudar-gravar dentro de um `BEGIN IMMEDIATE` só.
+- `Processo._gravar(p, mensagens)` grava uma operação longa preservando a lista de mensagens fresca.
+- `turno_ia` relê o registro assim que a resposta chega, antes de aplicar qualquer coisa.
+- `save_plan` passou a acusar conflito quando o **plano** mudou, não quando a versão subiu — uma imagem
+  pronta no meio de uma edição de estrutura não invalida mais a edição.
+
+**Medição do risco que restava.** A dúvida era se o Gateway serializa por agente: a imagem usa sessão nova
+(`openclaw.ts:362`) mas o mesmo `AGENTE`. Dois `/ia/perguntar` simultâneos com escopos diferentes:
+
+```
+A: terminou +77.5s (levou 77.5s)   B: terminou +77.7s (levou 77.7s)
+total de parede 77.7s · soma 155.2s  → PARALELO
+```
+
+O Gateway atende sessões concorrentes do mesmo agente em paralelo. A faixa `midia` com 3 vagas se paga.
+
+**Verificação:** `python -m pytest tests/` → 74 testes, todos passam (8 novos cobrem as faixas, a conversa
+livre durante operação, o limite de 3 imagens, a exclusividade da faixa que gasta e as duas direções da
+perda de escrita). `npm run build` no front passa com `tsc --noEmit`.
+
+**Não medido:** o custo de CPU de rodar ffmpeg (montagem) junto de outras faixas. A montagem pode ficar
+mais lenta quando há imagem e voz correndo ao mesmo tempo; não foi cronometrado.

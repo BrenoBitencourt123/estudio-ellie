@@ -1,7 +1,10 @@
 import copy
 import json
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -253,11 +256,108 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(imported, {k: v['node'] for k, v in second['imports'].items()})
         self.assertEqual(self.cli.runs, 0)
 
-    def test_chat_prevents_concurrent_spending(self):
-        self.s.chatting[self.p['id']] = 999999
-        with self.assertRaisesRegex(ValueError, 'processando'):
-            self.s.background(self.p['id'], lambda *_: None)
+    # ---------------- Faixas de trabalho: o que corre junto e o que espera ----------------
+    @contextmanager
+    def faixa_ocupada(self, faixa):
+        """Mantém um trabalho dessa faixa correndo enquanto o bloco roda."""
+        solta, comecou = threading.Event(), threading.Event()
+        def segura(*_):
+            comecou.set()
+            solta.wait(5)
+        self.s.background(self.p['id'], segura, faixa=faixa, rotulo=f'teste {faixa}')
+        comecou.wait(5)
+        try:
+            yield
+        finally:
+            solta.set()
+            for _ in range(200):
+                if not self.s.ocupado(self.p['id'], faixa):
+                    break
+                time.sleep(0.01)
+
+    def plano_atual(self):
+        p = self.s.store.get(self.p['id'])
+        return {k: p[k] for k in ('layout', 'duracao_final', 'tomadas', 'cortes', 'faixa', 'legenda')}
+
+    def test_imagem_voz_e_producao_correm_ao_mesmo_tempo(self):
+        with self.faixa_ocupada('midia'), self.faixa_ocupada('voz'), self.faixa_ocupada('producao'):
+            correndo = sorted(j['faixa'] for j in self.s.em_andamento(self.p['id']))
+            self.assertEqual(correndo, ['midia', 'producao', 'voz'])
+
+    def test_a_quarta_imagem_espera_uma_vaga(self):
+        with self.faixa_ocupada('midia'), self.faixa_ocupada('midia'), self.faixa_ocupada('midia'):
+            with self.assertRaisesRegex(ValueError, 'três imagens'):
+                self.s.background(self.p['id'], lambda *_: None, faixa='midia')
+
+    def test_so_uma_operacao_que_gasta_por_vez(self):
+        with self.faixa_ocupada('producao'):
+            with self.assertRaisesRegex(ValueError, 'cotando, gerando ou montando'):
+                self.s.background(self.p['id'], self.s.generate, Gerar(cotacao_id='q1', teto=720))
         self.assertEqual(self.cli.runs, 0)
+
+    def test_a_conversa_segue_livre_durante_qualquer_operacao(self):
+        with self.faixa_ocupada('midia'), self.faixa_ocupada('voz'), self.faixa_ocupada('producao'):
+            p = self.s.chat(self.p['id'], Mensagem(texto='e aí, como está indo?'))
+        self.assertEqual(p['mensagens'][-2]['texto'], 'e aí, como está indo?')
+        self.assertEqual(p['mensagens'][-1]['texto'], 'Qual referência?')
+
+    def test_estrutura_pode_mudar_com_imagem_correndo(self):
+        with self.faixa_ocupada('midia'):
+            p = self.s.save_plan(self.s.store.get(self.p['id']), self.plano_atual(), None)
+        self.assertEqual(len(p['tomadas']), len(self.p['tomadas']))
+
+    def test_estrutura_nao_muda_durante_a_producao(self):
+        with self.faixa_ocupada('producao'):
+            with self.assertRaisesRegex(ValueError, 'cotando, gerando ou montando'):
+                self.s.save_plan(self.s.store.get(self.p['id']), self.plano_atual(), None)
+
+    def test_a_rota_conta_o_que_esta_correndo_e_o_supervisor_enxerga(self):
+        router = create_router(self.root, lambda *_: '{}')
+        app = FastAPI(); app.include_router(router)
+        cliente = TestClient(app)
+        producao = router.service.create('Pela rota')
+        solta, comecou = threading.Event(), threading.Event()
+        def segura(*_):
+            comecou.set()
+            solta.wait(5)
+        router.service.background(producao['id'], segura, faixa='midia', rotulo='Gerando o cenário')
+        self.assertTrue(comecou.wait(5))
+        try:
+            corpo = cliente.get(f'/api/processo/{producao["id"]}').json()
+            self.assertTrue(corpo['ocupado'])
+            self.assertEqual([t['rotulo'] for t in corpo['trabalhos']], ['Gerando o cenário'])
+            # O supervisor usa esta rota para não reiniciar o servidor no meio de um trabalho
+            self.assertTrue(cliente.get('/api/processo/ocupado').json()['ocupado'])
+        finally:
+            solta.set()
+
+    def test_a_conversa_nao_apaga_o_que_o_segundo_plano_escreveu(self):
+        """A resposta da IA demora minutos. Uma imagem que ficar pronta no meio não pode sumir do chat."""
+        liberado, pensando = threading.Event(), threading.Event()
+        def devagar(*_):
+            pensando.set()
+            liberado.wait(5)
+            return json.dumps({"mensagem_pt": "Resposta da IA", "blocos": []})
+        self.s.ask = devagar
+        turno = threading.Thread(target=lambda: self.s.chat(self.p['id'], Mensagem(texto='monta uma cena')))
+        turno.start()
+        self.assertTrue(pensando.wait(5))
+        self.s.responder(self.p['id'], 'A imagem ficou pronta.')
+        liberado.set()
+        turno.join(10)
+        textos = [m['texto'] for m in self.s.store.get(self.p['id'])['mensagens']]
+        self.assertIn('A imagem ficou pronta.', textos)
+        self.assertIn('Resposta da IA', textos)
+
+    def test_o_segundo_plano_nao_apaga_o_que_a_conversa_escreveu(self):
+        """O lado oposto: uma operação longa da faixa de produção não pode engolir mensagens do chat."""
+        p = self.s.store.get(self.p['id'])
+        self.s.responder(self.p['id'], 'mensagem que precisa sobreviver')
+        p['status'] = 'parcial'  # grava o estado lido ANTES da mensagem acima
+        self.s._gravar(p)
+        textos = [m['texto'] for m in self.s.store.get(self.p['id'])['mensagens']]
+        self.assertIn('mensagem que precisa sobreviver', textos)
+        self.assertEqual(self.s.store.get(self.p['id'])['status'], 'parcial')
 
     def test_pilot_only_submits_the_chosen_shot(self):
         p = self.s.prepare_quote(self.p['id'], ['outono'])

@@ -19,6 +19,7 @@ export function useConversa() {
   const [dreamina, setDreamina] = useState<boolean | null>(null)
   const atual = useRef<Producao | null>(null)
   const ultimaConsulta = useRef(0)
+  const tique = useRef(0)
   const salvar = useCallback((p: Producao) => {
     atual.current = p; setProducao(p)
     setProducoes(list => [p, ...list.filter(other => other.id !== p.id)])
@@ -59,11 +60,17 @@ export function useConversa() {
     const timer = setInterval(() => {
       const p = atual.current
       if (!p || pensando) return
-      if (p.ocupado || ['gerando', 'envio_incerto'].includes(p.status)) {
+      tique.current += 1
+      const trabalhando = !!p.trabalhos?.length || p.ocupado || ['gerando', 'envio_incerto'].includes(p.status)
+      // Trabalhando: confere a cada 2,5 s. Parado: a cada 10 s, para notar trabalho começado
+      // fora desta janela (outra aba, ou a própria IA disparando uma faixa).
+      if (trabalhando || tique.current % 4 === 0) {
         void processo.obter(p.id).then(async fresh => {
           if (atual.current?.id !== fresh.id) return
           salvar(fresh)
-          if (!fresh.ocupado && ['gerando', 'envio_incerto'].includes(fresh.status) && Date.now() - ultimaConsulta.current > 12000) {
+          // Só consulta o Dreamina quando nada da faixa de produção está correndo (cotação, envio, montagem)
+          const produzindo = (fresh.trabalhos ?? []).some(t => t.faixa === 'producao')
+          if (!produzindo && ['gerando', 'envio_incerto'].includes(fresh.status) && Date.now() - ultimaConsulta.current > 12000) {
             ultimaConsulta.current = Date.now(); await processo.acompanhar(fresh.id)
           }
         }).catch(() => undefined)
@@ -82,7 +89,8 @@ export function useConversa() {
   }, [pensando])
   const nova = () => { atual.current = null; setProducao(null); setErro(''); localStorage.removeItem('ellie-producao-atual') }
   const enviar = async (texto: string, selecao?: Selecao, anexos: Midia[] = []) => {
-    if (pensando || atual.current?.ocupado) return
+    // Só o turno de IA anterior impede falar. Imagem, voz e montagem correm em paralelo à conversa.
+    if (pensando) return
     setPensando(true); setErro(''); setInicio(Date.now())
     try {
       let p = atual.current

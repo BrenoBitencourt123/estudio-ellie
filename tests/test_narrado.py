@@ -61,7 +61,7 @@ class NarradoTests(unittest.TestCase):
 
     def esperar(self):
         for _ in range(300):
-            if self.p['id'] not in self.s.busy:
+            if not self.s.ocupado(self.p['id']):
                 return
             time.sleep(0.05)
         self.fail('operação não terminou')

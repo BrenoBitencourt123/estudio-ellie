@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { processo, urlMidia, urlResultado } from '@/lib/processo'
+import { naFaixa, processo, urlMidia, urlResultado } from '@/lib/processo'
 import CartaoNarracao from '@/components/CartaoNarracao'
 import type { Bloco, Producao, Tomada } from '@/types/processo'
 
@@ -25,7 +25,8 @@ export default function CartaoProducao({ bloco, producao, abrir, responder, atua
   const pending = producao.tomadas.filter(s => !s.arquivo && !s.submit_id)
   const waiting = producao.tomadas.some(s => s.submit_id && !s.arquivo)
   const ready = producao.tomadas.length > 0 && producao.tomadas.every(s => s.arquivo)
-  const active = busy || producao.ocupado
+  // Só cotação/geração/montagem em curso travam estes botões; imagem e narração em paralelo não travam
+  const active = busy || naFaixa(producao, 'producao')
   // Lote da próxima cotação: no modo teste, só uma tomada (no lado a lado, a da esquerda)
   const lote = teste && pending.length > 1 ? [pending.find(s => s.lado === 'esquerda') ?? pending[0]] : pending
   // Só mostra a cotação se ela é deste lote e ainda não foi usada

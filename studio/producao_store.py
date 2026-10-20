@@ -66,6 +66,24 @@ class Store:
             db.execute("UPDATE producoes SET body=? WHERE id=?", (json.dumps(body, ensure_ascii=False), body["id"]))
         return body
 
+    def update(self, id: str, mudar) -> dict:
+        """Lê, muda e grava dentro da MESMA transação: duas operações em paralelo não perdem escrita.
+
+        `mudar` recebe o registro recém-lido e devolve o registro novo (ou None para não gravar nada).
+        Ele roda com o banco travado para escrita, então não pode fazer rede, disco nem chamar a IA."""
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT body FROM producoes WHERE id=?", (id,)).fetchone()
+            if not row:
+                raise ValueError("Produção não encontrada.")
+            atual = json.loads(row[0])
+            novo = mudar(atual)
+            if novo is None:
+                return atual
+            novo = {**novo, "versao": atual["versao"] + 1, "atualizado": agora()}
+            db.execute("UPDATE producoes SET body=? WHERE id=?", (json.dumps(novo, ensure_ascii=False), id))
+        return novo
+
     def event(self, id: str, type: str, body: dict) -> None:
         with self.connection() as db:
             db.execute("INSERT INTO eventos(producao,criado,tipo,body) VALUES (?,?,?,?)",
