@@ -8,12 +8,15 @@ auth-profiles*
 openclaw.json
 .openclaw/
 .codex/
-.claude/
+.claude/*
+!.claude/agents/
 
 # Dados e vídeos de cada usuário
 saida/*
 !saida/.gitkeep
 studio/dados/
+.claude-flow/
+.swarm/
 *.sqlite*
 *.db
 *.log
