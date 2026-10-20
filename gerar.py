@@ -23,6 +23,8 @@ from pathlib import Path
 
 import requests
 
+from studio.processos import rodar
+
 PASTA = Path(__file__).resolve().parent
 PASTA_PERSONA = PASTA / "persona"
 PASTA_PECAS = PASTA / "pecas"
@@ -178,14 +180,14 @@ def limpar_movimento(caminho: Path, duracao: int) -> Path:
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
         str(destino),
     ]
-    resultado = subprocess.run(comando, capture_output=True, text=True)
+    resultado = rodar(comando, capture_output=True, text=True)
     if resultado.returncode != 0:
         sair(f"FFmpeg falhou ao limpar {caminho.name}: {resultado.stderr.strip()}")
     return destino
 
 
 def duracao_video(caminho: Path) -> float:
-    resultado = subprocess.run(
+    resultado = rodar(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(caminho)],
         capture_output=True, text=True,
     )
@@ -357,7 +359,7 @@ def aumentar_para_1080(arquivo: Path) -> Path:
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "17", "-preset", "slow",
         str(destino),
     ]
-    resultado = subprocess.run(comando, capture_output=True, text=True)
+    resultado = rodar(comando, capture_output=True, text=True)
     if resultado.returncode != 0:
         print(f"   ⚠️  não consegui aumentar pra 1080p: {resultado.stderr.strip()}")
         return arquivo
@@ -433,7 +435,7 @@ def juntar_grupos(fila: list[dict[str, str]], registro: list[dict[str, str]]) ->
             "-filter_complex", ";".join(filtros), "-map", "[final]",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "slow", str(destino),
         ]
-        resultado = subprocess.run(comando, capture_output=True, text=True)
+        resultado = rodar(comando, capture_output=True, text=True)
         if resultado.returncode != 0:
             print(f"🎬 {grupo}: FFmpeg falhou: {resultado.stderr.strip()}")
             continue

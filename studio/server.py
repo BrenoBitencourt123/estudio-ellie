@@ -31,6 +31,7 @@ sys.path.insert(0, str(PASTA))
 
 import gerar  # noqa: E402  (precisa do sys.path acima)
 from studio import aprendizado, assistente, planejador, projetos, rostos, texto_tela  # noqa: E402
+from studio.processos import rodar  # noqa: E402
 
 PASTA_DADOS = Path(__file__).resolve().parent / "dados"
 ARQUIVO_RECEITAS = PASTA_DADOS / "receitas.json"
@@ -1270,7 +1271,7 @@ def quadros_referencia(movimento: str, inicio: float = 0, quantidade: int = 3) -
     pasta = PASTA_BRIEFINGS / f"ref_{Path(movimento).stem}_{int(time.time() * 1000)}"
     pasta.mkdir(parents=True, exist_ok=True)
     trecho = max(total - inicio, 1)
-    resultado = subprocess.run([
+    resultado = rodar([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", str(inicio), "-i", str(caminho),
         "-vf", f"fps={quantidade / trecho:.4f},scale=720:-2", "-frames:v", str(quantidade), "-q:v", "3",
         str(pasta / "q_%02d.jpg"),
@@ -1832,7 +1833,7 @@ def preparar_movimento(caminho: Path, inicio: float, duracao: int, kling: bool =
         "-vf", filtro,
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23" if kling else "18", str(destino),
     ]
-    resultado = gerar.subprocess.run(comando, capture_output=True, text=True)
+    resultado = rodar(comando, capture_output=True, text=True)
     if resultado.returncode != 0:
         raise RuntimeError(f"FFmpeg falhou ao preparar o movimento: {resultado.stderr.strip()[:300]}")
     if kling and destino.stat().st_size > TAMANHO_MAXIMO_KLING:

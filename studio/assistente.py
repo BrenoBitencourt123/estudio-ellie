@@ -18,6 +18,8 @@ from pathlib import Path
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
+from studio.processos import rodar
+
 URL_OPENAI = "https://api.openai.com/v1/chat/completions"
 QUADROS_POR_VIDEO = 6
 
@@ -102,7 +104,7 @@ def frames_do_video(video: Path, inicio: float, duracao: float, quantidade: int 
         "-vf", f"fps={quantidade / max(duracao, 1):.4f},scale=360:-2",
         "-frames:v", str(quantidade), str(pasta / "q_%02d.jpg"),
     ]
-    resultado = subprocess.run(comando, capture_output=True, text=True)
+    resultado = rodar(comando, capture_output=True, text=True)
     if resultado.returncode != 0:
         raise RuntimeError(f"FFmpeg falhou ao extrair os quadros: {resultado.stderr.strip()[:300]}")
     return sorted(pasta.glob("q_*.jpg"))

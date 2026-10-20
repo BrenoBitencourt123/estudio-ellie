@@ -8,18 +8,20 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from studio.processos import rodar
+
 
 def ffmpeg(*args: str) -> None:
-    process = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *map(str, args)],
-                             capture_output=True, text=True, encoding="utf-8", timeout=180)
+    process = rodar(["ffmpeg", "-hide_banner", "-loglevel", "error", *map(str, args)],
+                    capture_output=True, text=True, encoding="utf-8", timeout=180)
     if process.returncode:
         raise ValueError("A edição não concluiu: " + process.stderr[-1200:])
 
 
 def probe(path: Path) -> dict:
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-                             "stream=codec_type,width,height,r_frame_rate,nb_frames:format=duration,size", "-of", "json", str(path)],
-                            capture_output=True, text=True, timeout=25)
+    result = rodar(["ffprobe", "-v", "error", "-show_entries",
+                    "stream=codec_type,width,height,r_frame_rate,nb_frames:format=duration,size", "-of", "json", str(path)],
+                   capture_output=True, text=True, timeout=25)
     if result.returncode:
         raise ValueError("Arquivo de vídeo inválido ou incompleto: " + path.name)
     data = json.loads(result.stdout)

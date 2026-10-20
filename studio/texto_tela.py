@@ -12,6 +12,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
+from studio.processos import rodar
+
 LARGURA, ALTURA = 1080, 1920
 FONTES = {
     "serifa": ("C:/Windows/Fonts/georgiai.ttf", 64),
@@ -41,16 +43,16 @@ def _quebrar(texto: str, fonte: ImageFont.FreeTypeFont, maximo: int) -> list[str
 
 
 def _duracao(video: Path) -> float:
-    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video)],
-                       capture_output=True, text=True)
+    r = rodar(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video)],
+              capture_output=True, text=True)
     return float(r.stdout.strip() or 0)
 
 
 def _quadros(video: Path, pasta: Path, quantidade: int = 8) -> list[Path]:
     dur = max(_duracao(video), 1)
-    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
-                    "-vf", f"fps={quantidade / dur:.4f},scale=360:-2", "-frames:v", str(quantidade),
-                    str(pasta / "q_%02d.png")], check=True)
+    rodar(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
+           "-vf", f"fps={quantidade / dur:.4f},scale=360:-2", "-frames:v", str(quantidade),
+           str(pasta / "q_%02d.png")], check=True)
     return sorted(pasta.glob("q_*.png"))
 
 
@@ -127,7 +129,7 @@ def aplicar(entrada: Path, saida: Path, texto: str, estilo: str = "serifa", posi
         png = tmp / "texto.png"
         camada.save(png)
 
-        resultado = subprocess.run([
+        resultado = rodar([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(entrada), "-i", str(png),
             "-filter_complex", f"[0:v]scale={LARGURA}:{ALTURA}[v];[v][1:v]overlay=0:0",
             "-c:v", "libx264", "-crf", "17", "-preset", "medium", "-pix_fmt", "yuv420p",
@@ -160,7 +162,7 @@ def compor(entrada: Path, camada_png: Path, saida: Path) -> None:
     with Image.open(camada_png) as img:
         if img.size != (LARGURA, ALTURA) or img.mode != "RGBA":
             raise RuntimeError(f"A camada de texto precisa ser PNG RGBA de {LARGURA}x{ALTURA} (veio {img.size} {img.mode}).")
-    resultado = subprocess.run([
+    resultado = rodar([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(entrada), "-i", str(camada_png),
         "-filter_complex", f"[0:v]scale={LARGURA}:{ALTURA}[v];[v][1:v]overlay=0:0",
         "-c:v", "libx264", "-crf", "17", "-preset", "medium", "-pix_fmt", "yuv420p",

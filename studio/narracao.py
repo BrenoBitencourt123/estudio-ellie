@@ -20,6 +20,8 @@ from pathlib import Path
 
 import requests
 
+from studio.processos import rodar
+
 RAIZ = Path(__file__).resolve().parent.parent
 URL = "https://api.elevenlabs.io/v1/text-to-speech/{voz}/with-timestamps"
 MODELO_PADRAO = "eleven_multilingual_v2"
@@ -91,8 +93,8 @@ def gerar_elevenlabs(texto: str, destino: Path, voz: str = "", modelo: str = "")
 
 
 def duracao_audio(caminho: Path) -> float:
-    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(caminho)],
-                       capture_output=True, text=True, timeout=25)
+    r = rodar(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(caminho)],
+              capture_output=True, text=True, timeout=25)
     try:
         return float(json.loads(r.stdout)["format"]["duration"])
     except (ValueError, KeyError):
@@ -145,8 +147,8 @@ def alinhar_arquivo(audio: Path, texto: str = "") -> list[dict]:
         import numpy as np
         from faster_whisper import WhisperModel
         tmp = audio.with_suffix(".16k.wav")
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(audio), "-ac", "1", "-ar", "16000", str(tmp)],
-                       check=True, timeout=60)
+        rodar(["ffmpeg", "-v", "error", "-y", "-i", str(audio), "-ac", "1", "-ar", "16000", str(tmp)],
+              check=True, timeout=60)
         with wave.open(str(tmp)) as w:
             sinal = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
         tmp.unlink(missing_ok=True)

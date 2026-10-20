@@ -8,6 +8,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from studio.processos import rodar
+
 
 class CliError(RuntimeError):
     pass
@@ -20,8 +22,8 @@ class Dreamina:
 
     def call(self, *args: str, timeout: int = 120) -> dict:
         try:
-            process = subprocess.run([self.binary, "--format", "json", "--non-interactive", *map(str, args)],
-                                     capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+            process = rodar([self.binary, "--format", "json", "--non-interactive", *map(str, args)],
+                            capture_output=True, text=True, encoding="utf-8", timeout=timeout)
         except FileNotFoundError:
             raise CliError("CLI Dreamina não encontrada. Instale a CLI ou configure DREAMINA_CLI.") from None
         except subprocess.TimeoutExpired:
