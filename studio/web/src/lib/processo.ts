@@ -1,8 +1,15 @@
-import type { Biblioteca, FaixaTrabalho, Midia, ModeloVideo, PlanoProducao, Producao, Selecao } from '@/types/processo'
+import type {
+  AjustesNarracao, Biblioteca, FaixaTrabalho, Ficha, Midia, ModeloVideo, PapelReferencia, PlanoProducao, Producao, ReferenciaCriativa,
+  Selecao, Tomada,
+} from '@/types/processo'
 
 // Só a faixa em questão trava o botão dela; o resto da tela (e o chat) continua livre.
 export const naFaixa = (p: Producao | null | undefined, ...faixas: FaixaTrabalho[]) =>
   (p?.trabalhos ?? []).some(t => faixas.includes(t.faixa))
+
+// Cena de imagem não passa pelo Dreamina: o movimento é feito na montagem, sem créditos
+export const ehPaga = (s: Tomada) => (s.tipo ?? 'video') !== 'imagem'
+export const prontaParaMontar = (s: Tomada) => !!s.arquivo || (s.tipo === 'imagem' && s.imagens.length > 0)
 
 async function request<T>(path: string, method = 'GET', body?: unknown, human = false): Promise<T> {
   const response = await fetch(`/api/processo${path}`, {
@@ -24,6 +31,24 @@ export const processo = {
     const value = await r.json()
     if (!r.ok) throw new Error(value.detail ?? 'O áudio não foi enviado.')
     return value
+  },
+  ajustarNarracao: (id: string, ajustes: AjustesNarracao) => request<Producao>(`/${id}/narracao/ajustes`, 'PUT', ajustes),
+  // Ficha central, caderno de referências, conferência e revisão do storyboard
+  salvarCaderno: (p: Producao, ficha: Ficha, referencias: ReferenciaCriativa[]) =>
+    request<Producao>(`/${p.id}/caderno`, 'PUT', { versao: p.versao, ficha, referencias }),
+  ativarReferencia: (id: string, asset: Midia, papel: PapelReferencia = 'inspiracao', ativa = true) =>
+    request<Producao>(`/${id}/referencias/ativar`, 'POST', { asset, papel, ativa }),
+  revisarStoryboard: (p: Producao) => request<Producao>(`/${p.id}/storyboard/revisar`, 'POST', { assinatura: p.revisao_atual?.assinatura ?? '' }),
+  conferirCena: (id: string, cena: string, material: 'quadro' | 'video' = 'quadro') => request(`/${id}/cenas/${cena}/conferir`, 'POST', { material }),
+  aceitarCena: (id: string, cena: string, material: 'quadro' | 'video' = 'quadro') => request<Producao>(`/${id}/cenas/${cena}/aceitar`, 'POST', { material }),
+  refazerCena: (id: string, cena: string) => request<Producao>(`/${id}/cenas/${cena}/refazer`, 'POST'),
+  trilhas: () => request<string[]>('/trilhas'),
+  enviarTrilha: async (file: File) => {
+    const body = new FormData(); body.append('arquivo', file)
+    const r = await fetch('/api/processo/trilhas', { method: 'POST', body })
+    const value = await r.json()
+    if (!r.ok) throw new Error(value.detail ?? 'A música não foi enviada.')
+    return value as { nome: string }
   },
   obter: (id: string) => request<Producao>(`/${id}`),
   biblioteca: () => request<Biblioteca>('/biblioteca'),
@@ -51,6 +76,7 @@ export const processo = {
 export const urlMidia = (pasta: string, nome: string) => `/api/processo/arquivo/${encodeURIComponent(pasta)}/${encodeURIComponent(nome)}`
 export const urlResultado = (id: string) => `/api/processo/${id}/resultado`
 export const urlNarracao = (id: string, audio: string) => `/api/processo/${id}/narracao/audio?v=${encodeURIComponent(audio)}`
+export const urlTrilha = (nome: string) => `/api/processo/trilhas/${encodeURIComponent(nome)}`
 export const planoDe = (p: Producao): PlanoProducao => ({
   layout: p.layout, duracao_final: p.duracao_final, tomadas: p.tomadas, cortes: p.cortes, faixa: p.faixa, legenda: p.legenda,
 })

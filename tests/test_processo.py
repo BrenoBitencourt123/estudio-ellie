@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from studio.caderno import assinatura_revisao
 from studio.processo import Processo, Mensagem, Gerar, Selecao, create_router, plano_exemplo_ellie
 
 
@@ -85,6 +86,7 @@ class ProductionTests(unittest.TestCase):
         for shot in p['tomadas']:
             shot['node_id'] = 'node_' + shot['id']
         p['cotacao'] = {"id": "q1", "total": 720, "hash": self.s.generation_hash(p), "draft_version": 1}
+        p['revisao'] = {"assinatura": assinatura_revisao(p)}  # o storyboard foi revisado: só então gasta
         self.s.store.save(p)
         return p
 
@@ -361,6 +363,8 @@ class ProductionTests(unittest.TestCase):
 
     def test_pilot_only_submits_the_chosen_shot(self):
         p = self.s.prepare_quote(self.p['id'], ['outono'])
+        p['revisao'] = {"assinatura": assinatura_revisao(p)}
+        p = self.s.store.save(p)
         p = self.s.generate(p['id'], Gerar(cotacao_id=p['cotacao']['id'], teto=720))
         sent = [s['id'] for s in p['tomadas'] if s.get('submit_id')]
         self.assertEqual(sent, ['outono'])

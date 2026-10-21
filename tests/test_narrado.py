@@ -148,7 +148,9 @@ class NarradoTests(unittest.TestCase):
         self.s.store.save(p)
         p = self.s.render(self.p['id'])
         self.assertEqual((p['resultado']['width'], p['resultado']['height']), (1080, 1920))
-        self.assertGreaterEqual(p['resultado']['duracao'], 5.4)  # voz 5 s + folga; segura o último quadro
+        # Áudio primeiro: o vídeo dura o tempo da voz (5 s); a cena de 4 s ganha câmera lenta em vez de congelar
+        self.assertAlmostEqual(p['resultado']['duracao'], 5.0, delta=.1)
+        self.assertLess(p['cortes'][0]['velocidade'], 1)
 
     def test_tres_cenas_com_faixa_sem_narracao(self):
         for i, cor in enumerate(['red', 'green', 'blue'], 1):
@@ -167,7 +169,7 @@ class NarradoTests(unittest.TestCase):
         self.assertEqual((p['resultado']['width'], p['resultado']['height']), (1080, 1920))
         self.assertAlmostEqual(p['resultado']['duracao'], 7, delta=.1)
 
-    def test_varias_cenas_com_voz_curta_mantem_a_sequencia(self):
+    def test_varias_cenas_com_voz_curta_seguem_a_voz(self):
         for i in (1, 2):
             self._video(f'c{i}.mp4', 'gray', 4)
         out = self.s.output(self.p['id'])
@@ -182,7 +184,10 @@ class NarradoTests(unittest.TestCase):
                              {"p": "be", "ini": .7, "fim": .9}, {"p": "still.", "ini": 1.0, "fim": 1.5}])
         self.s.store.save(p)
         p = self.s.render(self.p['id'])
-        self.assertGreaterEqual(p['resultado']['duracao'], 7.9)
+        # As duas cenas dividem os 3 s da voz em vez de esticar o vídeo para 8 s com fala só no começo
+        self.assertAlmostEqual(p['resultado']['duracao'], 3.0, delta=.1)
+        self.assertEqual(len(p['cortes']), 2)
+        self.assertAlmostEqual(sum(c['duracao'] for c in p['cortes']), 3.0, delta=.01)
 
     def test_texto_sem_voz_nao_monta(self):
         self._video('c1.mp4', 'gray', 4)

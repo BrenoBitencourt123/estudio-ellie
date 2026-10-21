@@ -101,7 +101,11 @@ class ColarImagemTests(unittest.TestCase):
         self.s.chat(self.p['id'], Mensagem(texto='e se mudarmos a ideia do vídeo todo?'))
         self.s.chat(self.p['id'], Mensagem(texto='agora pensa na roupa do outono'))
         self.assertEqual(self.imagens, [])  # "roupa" não dispara imagem com anexo velho
-        self.assertNotIn('ref.png', [f.name for f in self.ia_chamadas[-1][1]])
+        # O anexo deixa de ser "colado agora", mas continua no caderno de referências: a IA segue vendo
+        # a referência que o Breno mandou (antes ela sumia do contexto depois de dois turnos)
+        p = self.s.store.get(self.p['id'])
+        self.assertEqual(p['anexos_pendentes'], [])
+        self.assertTrue(any(r['asset']['nome'] == 'ref.png' and r['ativa'] for r in p['referencias_criativas']))
 
     def test_ia_pode_pedir_imagem(self):
         self.s.ask = lambda prompt, photos: json.dumps({"mensagem_pt": "Vou criar o cenário.", "blocos": [],

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import CartaoProducao from '@/components/CartaoProducao'
 import Cronometro, { duracao } from '@/components/Cronometro'
 import EtapasProducao from '@/components/EtapasProducao'
+import ProximoPasso from '@/components/ProximoPasso'
 import EdicaoConversa from '@/components/EdicaoConversa'
 import GaleriaConversa from '@/components/GaleriaConversa'
 import PlanoConversa from '@/components/PlanoConversa'
@@ -92,21 +93,35 @@ export default function App() {
   const p = chat.producao
   useEffect(() => { fim.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [p?.mensagens.length, chat.pensando, chat.aoVivo, painel])
   const abrir = (block: Bloco) => {
-    if (['galeria', 'upload', 'plano', 'edicao'].includes(block.tipo)) setModal(block)
+    if (['galeria', 'upload', 'edicao'].includes(block.tipo) || (block.tipo === 'plano' && block.tecnico)) setModal(block)
     else setPainel(block)
+  }
+  const nova = () => { setPainel(null); setModal(null); setTexto(''); setAvisoAudio(''); colados.limpar(); chat.nova() }
+  const ajustarCena = (id: string) => {
+    const i = p?.tomadas.findIndex(s => s.id === id) ?? -1
+    if (p && i >= 0) { setTexto(`Na cena ${i + 1}, “${p.tomadas[i].titulo}”, quero mudar: `); input.current?.focus() }
   }
   const enviar = async (value: string) => {
     const anexos = colados.prontos
     if ((!value.trim() && !anexos.length) || colados.enviando) return
-    setTexto(''); colados.limpar()
-    await chat.enviar(value.trim(), undefined, anexos); input.current?.focus()
+    const enviados = colados.anexos.filter(a => a.asset).map(a => a.id)
+    setTexto('')
+    const sucesso = await chat.enviar(value.trim(), undefined, anexos)
+    if (sucesso) enviados.forEach(colados.remover)
+    else setTexto(atual => atual || value)
+    input.current?.focus()
   }
+  useEffect(() => {
+    try {
+      if (texto) sessionStorage.setItem('ellie-rascunho', texto)
+      else sessionStorage.removeItem('ellie-rascunho')
+    } catch { /* segue sem armazenamento */ }
+  }, [texto])
   // Atualização sem reiniciar: quando a interface compilada muda, recarrega assim que estiver livre
   const versao = useRef(0)
   const livre = useRef(true)
   livre.current = !chat.pensando && !p?.ocupado && !modal && !colados.anexos.length
   useEffect(() => {
-    try { sessionStorage.removeItem('ellie-rascunho') } catch { /* sem armazenamento */ }
     const timer = setInterval(() => {
       void fetch('/api/versao').then(r => r.ok ? r.json() : null).then((v: { interface?: number } | null) => {
         if (!v?.interface) return
@@ -123,12 +138,12 @@ export default function App() {
   const podeEnviar = (!!texto.trim() || colados.prontos.length > 0) && !colados.enviando && !chat.pensando
   const refs = [p?.master, p?.referencia, ...(p?.tomadas ?? []).map(s => s.imagens[0]).filter(a => a && a.pasta !== 'base')].filter(a => !!a).slice(0, 4)
   const card = (block: Bloco, key: string) => p && <CartaoProducao key={key} bloco={block} producao={p} abrir={abrir}
-    responder={value => void enviar(value)} atualizar={chat.atualizar} />
+    responder={value => void enviar(value)} atualizar={chat.atualizar} ajustarCena={ajustarCena} />
   return <div className="studio-chat">
     <aside className="conversation-sidebar" aria-label="Conversas de produção">
-      <a className="studio-brand" href="#" onClick={e => { e.preventDefault(); chat.nova() }}>estúdio <em>ellie.</em></a>
+      <a className="studio-brand" href="#" onClick={e => { e.preventDefault(); nova() }}>estúdio <em>ellie.</em></a>
       <p className="brand-note">Da referência ao vídeo,<br />numa conversa.</p>
-      <button className="primary-button new-conversation" onClick={chat.nova}>+ Novo vídeo</button>
+      <button className="primary-button new-conversation" onClick={nova}>+ Novo vídeo</button>
       <button className="secondary-button mobile-history" onClick={() => setHistorico(true)}>Conversas</button>
       <span className="eyebrow history-label">SUAS PRODUÇÕES</span>
       <nav className="conversation-list">{chat.producoes.map(item => <button key={item.id} aria-current={p?.id === item.id ? 'page' : undefined}
@@ -152,8 +167,17 @@ export default function App() {
             <span className="message-author">{message.papel === 'user' ? 'Você' : 'Direção Ellie'}<time className="message-time">{hora(message.criado)}{tempoResposta(p.mensagens, i)}</time></span>{message.texto && <p>{message.texto}</p>}
             {!!message.anexos?.length && <div className="message-attachments">{message.anexos.map(a =>
               <img key={a.nome} src={urlMidia(a.pasta, a.nome)} alt="Imagem colada" />)}</div>}
-            {message.blocos?.map((block, index) => card(block, `${message.id}-${index}`))}
-            {message.ia && <small className="usage-meter">{medidor(message.ia)}</small>}</article>)}
+            {message.blocos?.map((block, index) => {
+              // Cartões de operação leem o estado atual: uma única instância de cada
+              // evita tetos de crédito e formulários diferentes no mesmo histórico.
+              if (block.tipo === 'quiz' && p.mensagens.slice(i + 1).some(m => m.papel === 'user')) return null
+              const atual = ['direcao', 'caderno', 'plano', 'custo', 'narracao', 'edicao', 'resultado'].includes(block.tipo)
+              if (atual && (painel?.tipo === block.tipo || (block.tipo === 'resultado' && p.resultado)
+                || p.mensagens.slice(i + 1).some(m => m.blocos?.some(b => b.tipo === block.tipo)))) return null
+              return card(block, `${message.id}-${index}`)
+            })}
+            {!!message.mudancas?.length && <details className="changes-summary"><summary>O que mudou nesta versão</summary><ul>{message.mudancas.map((linha, j) => <li key={j}>{linha}</li>)}</ul></details>}
+            {message.ia && <details className="response-details"><summary>Detalhes da resposta</summary><small className="usage-meter">{medidor(message.ia)}</small></details>}</article>)}
           {chat.pensando && (chat.aoVivo
             ? <article className="chat-message assistant live"><span className="message-author">Direção Ellie<time className="message-time"><Cronometro desde={chat.inicio} /></time></span><p>{chat.aoVivo}<span className="caret" /></p></article>
             : <p className="thinking-message" role="status">A diretora está montando a próxima parte… <Cronometro desde={chat.inicio} /></p>)}
@@ -161,17 +185,21 @@ export default function App() {
           {p?.erro && !chat.pensando && <p className="error-message" role="alert">{p.erro}</p>}
           {chat.erro && <p className="error-message" role="alert">{chat.erro}</p>}
           {avisoAudio && <p className="thinking-message" role="status">{avisoAudio}</p>}
-          {painel && card(painel, 'painel-atual')}
+          {painel && painel.tipo !== 'resultado' && card(painel, 'painel-atual')}
           {p?.resultado && card({ tipo: 'resultado', titulo: 'Seu vídeo' }, `resultado-${p.resultado.nome}`)}
           <div ref={fim} />
         </div>
         <div className="composer-wrap">
+          {p && !chat.pensando && <ProximoPasso producao={p} abrir={abrir} />}
           {p && <nav className="context-actions" aria-label="Controles da conversa">
+            <button onClick={() => abrir({ tipo: 'direcao', titulo: 'Direção do vídeo' })}>Direção</button>
+            <button onClick={() => abrir({ tipo: 'plano', titulo: 'Sequência de cenas' })}>Cenas</button>
+            <button onClick={() => abrir({ tipo: 'caderno', titulo: 'Caderno da produção' })}>Caderno</button>
             <button onClick={() => setModal({ tipo: 'galeria', titulo: 'Escolher referência', pasta: 'movimentos' })}>+ Referência</button>
-            <button onClick={() => abrir({ tipo: 'narracao', titulo: 'Narração' })}>Narração</button>
+            {(!!p.narracao?.texto || !!p.tomadas.length) && <button onClick={() => abrir({ tipo: 'narracao', titulo: 'Narração' })}>Narração</button>}
             <button onClick={() => { setTexto('busca no pinterest '); input.current?.focus() }}>Pinterest</button>
-            <button onClick={() => abrir({ tipo: 'plano' })}>Estrutura</button><button onClick={() => abrir({ tipo: 'custo', titulo: 'Orçamento da produção' })}>Custo e geração</button>
-            <button onClick={() => { setPainel({ tipo: 'edicao', titulo: 'Montagem local' }); abrir({ tipo: 'edicao' }) }}>Texto e montagem</button></nav>}
+            {!!p.tomadas.length && <><button onClick={() => abrir({ tipo: 'custo', titulo: 'Produzir as cenas' })}>Produzir</button>
+            <button onClick={() => { setPainel({ tipo: 'edicao', titulo: 'Montagem local' }); abrir({ tipo: 'edicao' }) }}>Montagem</button></>}</nav>}
           {!!colados.anexos.length && <div className="attachment-chips" aria-label="Imagens coladas">{colados.anexos.map(a =>
             <div className={`attachment-chip ${a.erro ? 'failed' : a.asset ? '' : 'uploading'}`} key={a.id} title={a.erro ?? a.asset?.nome ?? 'Enviando…'}>
               <img src={a.url} alt="" /><button type="button" aria-label="Remover imagem" onClick={() => colados.remover(a.id)}>×</button></div>)}
@@ -190,14 +218,16 @@ export default function App() {
         </div>
       </section>
       <aside className="production-context" aria-label="Contexto da produção">
+        {p?.direcao?.ideia && <section className="direction-summary"><span className="eyebrow">DIREÇÃO ATUAL</span><p>{p.direcao.ideia}</p>
+          <button className="text-link" onClick={() => abrir({ tipo: 'direcao', titulo: 'Direção do vídeo' })}>Ver direção completa</button></section>}
         {p && <EtapasProducao producao={p} />}
         <span className="eyebrow">O QUE JÁ TEMOS</span>
         <h2>{p ? 'Nossa base' : 'Tudo no contexto'}</h2><p>As escolhas ficam salvas junto da conversa.</p>
         {refs.map((asset, i) => <div className="context-reference" key={`${asset.pasta}-${asset.nome}`}>
           {asset.pasta === 'movimentos' ? <video src={urlMidia(asset.pasta, asset.nome)} controls preload="metadata" /> : <img src={urlMidia(asset.pasta, asset.nome)} alt="Modelo aprovada para esta produção" />}
-          <div><span>{i === 0 && p?.master ? 'Modelo' : 'Movimento'}</span><small>{asset.nome}</small></div></div>)}
+          <div><span>{i === 0 && p?.master ? 'Modelo' : asset.pasta === 'movimentos' ? 'Referência de movimento' : 'Quadro da cena'}</span><small>{asset.nome}</small></div></div>)}
         {!refs.length && <div className="context-empty">As referências aparecem aqui conforme a gente escolhe.</div>}
-        {p && <><dl className="production-facts"><div><dt>Vídeo final</dt><dd>{p.duracao_final}s · vertical</dd></div>
+        {p && <><dl className="production-facts"><div><dt>Vídeo final</dt><dd>{p.tomadas.length ? `${Number(p.duracao_final.toFixed(1))}s · vertical` : 'Duração a definir'}</dd></div>
           <div><dt>Tomadas</dt><dd>{p.tomadas.length} · {p.tomadas.reduce((sum, shot) => sum + shot.duracao, 0)}s brutos</dd></div>
           <div><dt>Cotação atual</dt><dd>{p.cotacao ? `${p.cotacao.total} créditos` : 'Não consultada'}</dd></div></dl>
           {p.canvas_url && <a className="text-link" href={p.canvas_url} target="_blank" rel="noreferrer">Abrir canvas Dreamina ↗</a>}

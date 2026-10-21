@@ -34,6 +34,8 @@ quadros/*
 !quadros/.gitkeep
 referencias/*
 !referencias/.gitkeep
+trilhas/*
+!trilhas/.gitkeep
 exemplos/producao-v7.json
 docs/previa-*.png
 movimentos/.limpos/

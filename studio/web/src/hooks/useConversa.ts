@@ -90,17 +90,37 @@ export function useConversa() {
   const nova = () => { atual.current = null; setProducao(null); setErro(''); localStorage.removeItem('ellie-producao-atual') }
   const enviar = async (texto: string, selecao?: Selecao, anexos: Midia[] = []) => {
     // Só o turno de IA anterior impede falar. Imagem, voz e montagem correm em paralelo à conversa.
-    if (pensando) return
+    if (pensando) return false
     setPensando(true); setErro(''); setInicio(Date.now())
+    let id = atual.current?.id
+    const anteriores = new Set(atual.current?.mensagens.map(m => m.id) ?? [])
     try {
       let p = atual.current
       if (!p) { p = await processo.criar(texto.slice(0, 75) || (anexos.length ? 'Imagem colada' : 'Novo vídeo')); salvar(p) }
+      id = p.id
       // Mostra a mensagem na hora; a resposta do servidor substitui esta cópia local
       const local = { id: `local-${Date.now()}`, papel: 'user' as const, texto: texto || (selecao ? `Escolhi ${selecao.asset.nome}` : ''), anexos, criado: new Date().toISOString() }
       salvar({ ...p, mensagens: [...p.mensagens, local] })
       salvar(await processo.conversar(p.id, texto, selecao, anexos))
       if (anexos.length) void atualizarBiblioteca()
-    } catch (e) { setErro(e instanceof Error ? e.message : 'Não consegui enviar a mensagem.'); await atualizar().catch(() => undefined) }
+      return true
+    } catch (e) {
+      // Não reenviar automaticamente: o servidor pode ter recebido a mensagem
+      // antes de a conexão cair. Confere o histórico para evitar duplicação.
+      if (id) {
+        try {
+          const fresh = await processo.obter(id)
+          salvar(fresh)
+          if (fresh.mensagens.some(m => m.papel === 'user' && m.texto === texto && !anteriores.has(m.id))) {
+            setErro('Sua mensagem está salva. A conexão foi interrompida; confira a conversa antes de reenviar.')
+            return true
+          }
+        } catch { /* servidor ainda reiniciando; conserva o rascunho */ }
+      }
+      setErro(e instanceof TypeError ? 'O Estúdio está reconectando. Seu texto e anexos foram mantidos; tente enviar quando a conexão voltar.'
+        : e instanceof Error ? e.message : 'Não consegui enviar a mensagem. Seu rascunho foi mantido.')
+      return false
+    }
     finally { setPensando(false) }
   }
   return { producoes, producao, biblioteca, carregando, pensando, inicio, aoVivo, modelos, erro, ia, dreamina, conexaoDetalhe, verificandoConexao, verificarConexao, salvar, abrir, atualizar, atualizarBiblioteca, nova, enviar }

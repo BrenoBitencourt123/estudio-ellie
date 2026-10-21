@@ -78,7 +78,8 @@ class PinterestTests(unittest.TestCase):
         p = self.esperar()
         self.assertEqual(p['tomadas'][0]['imagens'], [{"pasta": "quadros", "nome": "q.png"}])
         self.assertEqual(p['erro'], '')
-        self.assertIn('Pronto', p['mensagens'][-1]['texto'])
+        # depois do "Pronto" vem a conferência do quadro, numa mensagem própria
+        self.assertTrue(any('Pronto' in m['texto'] for m in p['mensagens']))
 
     def test_ia_pede_busca(self):
         self.s.chat(self.p['id'], Mensagem(texto='acha umas referências de Jesus acalmando a tempestade'))

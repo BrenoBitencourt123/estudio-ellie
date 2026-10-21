@@ -131,7 +131,9 @@ class Dreamina:
     def draft(self, shot: dict, project: str, refs: list[str]) -> dict:
         # Os vínculos do prompt apontam para os mesmos nós passados em --ref.
         prompt = "\n".join(f"Reference {i+1}: {{{{node:{ref}}}}}" for i, ref in enumerate(refs)) + "\n" + shot["prompt"]
-        args = ["node", "create", "video", "--project-id", project,
+        # create com um ID já existente conflita (service.7). A CLI tem um
+        # comando próprio para editar o rascunho, sem iniciar geração.
+        args = ["node", "edit" if shot.get("node_id") else "create", "video", "--project-id", project,
                 *(["--node-id", shot["node_id"]] if shot.get("node_id") else []),
                 "--title", shot["titulo"], "--model", shot["modelo"], "--mode", shot["modo"],
                 "--resolution", shot["resolucao"], "--ratio", "9:16", "--duration", str(shot["duracao"]),

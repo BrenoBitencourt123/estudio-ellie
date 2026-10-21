@@ -9,19 +9,19 @@ export default function GaleriaConversa({ bloco, biblioteca, producao, escolher,
   escolher: (s: Selecao) => Promise<void>; fechar: () => void; atualizar: () => Promise<void>
 }) {
   const [pasta, setPasta] = useState<PastaMidia>(bloco.pasta ?? 'movimentos')
-  const [tomada, setTomada] = useState(producao?.tomadas[0]?.id ?? '')
+  const [tomada, setTomada] = useState(bloco.tomada ?? producao?.tomadas.find(s => !s.imagens.length)?.id ?? producao?.tomadas[0]?.id ?? '')
   const [erro, setErro] = useState('')
   const [enviando, setEnviando] = useState(false)
   const papel = pasta === 'movimentos' ? 'movimento' : pasta === 'persona' ? 'master' : pasta === 'saida' ? 'bruto' : 'estado'
   const escolherArquivo = async (nome: string) => {
     setErro(''); setEnviando(true)
-    try { await escolher({ papel, asset: { pasta, nome }, ...(papel === 'bruto' ? { tomada } : {}) }); fechar() }
+    try { await escolher({ papel, asset: { pasta, nome }, ...(['bruto', 'estado'].includes(papel) ? { tomada } : {}) }); fechar() }
     catch (e) { setErro(String(e instanceof Error ? e.message : e)) }
     finally { setEnviando(false) }
   }
   return <ConversaModal titulo={bloco.titulo || 'Referências da produção'} fechar={fechar}>
     <nav className="folder-tabs" aria-label="Pastas da biblioteca">{Object.entries(nomes).map(([key, value]) =>
-      <button key={key} className={pasta === key ? 'selected' : ''} onClick={() => setPasta(key as PastaMidia)}>{value}</button>)}</nav>
+      <button key={key} aria-pressed={pasta === key} className={pasta === key ? 'selected' : ''} onClick={() => setPasta(key as PastaMidia)}>{value} ({biblioteca[key as PastaMidia].length})</button>)}</nav>
     <div className="upload-row"><p>Escolha uma referência existente ou envie um arquivo.</p>
       <label className="secondary-button upload-label">Enviar arquivo<input type="file" disabled={enviando}
         accept={pasta === 'movimentos' || pasta === 'saida' ? 'video/*' : 'image/*'} onChange={async e => {
@@ -30,7 +30,7 @@ export default function GaleriaConversa({ bloco, biblioteca, producao, escolher,
           try { const a = await processo.upload(pasta, file); await atualizar(); setEnviando(false); await escolherArquivo(a.nome) }
           catch (error) { setErro(error instanceof Error ? error.message : 'O envio falhou.'); setEnviando(false) }
         }} /></label></div>
-    {papel === 'bruto' && <label className="field">Reaproveitar como<select value={tomada} onChange={e => setTomada(e.target.value)}>
+    {['bruto', 'estado'].includes(papel) && !!producao?.tomadas.length && <label className="field">{papel === 'bruto' ? 'Reaproveitar como' : 'Usar na cena'}<select value={tomada} onChange={e => setTomada(e.target.value)}>
       {producao?.tomadas.map(s => <option value={s.id} key={s.id}>{s.titulo}</option>)}</select></label>}
     {erro && <p className="error-message" role="alert">{erro}</p>}
     <div className="media-gallery">{biblioteca[pasta].map(nome => <article key={nome}>

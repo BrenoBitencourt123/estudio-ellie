@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
-import { planoDe, processo } from '@/lib/processo'
-import type { Biblioteca, ModeloVideo, PlanoProducao, Producao } from '@/types/processo'
+import { ehPaga, planoDe, processo } from '@/lib/processo'
+import type { Biblioteca, ModeloVideo, MovimentoLocal, PlanoProducao, Producao, TipoTomada } from '@/types/processo'
 import ConversaModal from './ConversaModal'
+
+const MOVIMENTOS: { valor: MovimentoLocal; nome: string }[] = [
+  { valor: 'aproximar', nome: 'Aproximar devagar' }, { valor: 'afastar', nome: 'Afastar devagar' },
+  { valor: 'subir', nome: 'Subir' }, { valor: 'descer', nome: 'Descer' },
+  { valor: 'esquerda', nome: 'Para a esquerda' }, { valor: 'direita', nome: 'Para a direita' },
+]
 
 export default function PlanoConversa({ producao, biblioteca, fechar, salvar }: {
   producao: Producao; biblioteca: Biblioteca; fechar: () => void; salvar: (p: Producao) => void
@@ -14,18 +20,31 @@ export default function PlanoConversa({ producao, biblioteca, fechar, salvar }: 
   const changeShot = (i: number, data: Partial<PlanoProducao['tomadas'][number]>) =>
     setPlan(p => ({ ...p, tomadas: p.tomadas.map((s, index) => index === i ? { ...s, ...data } : s) }))
   return <ConversaModal titulo="Estrutura do vídeo" fechar={fechar}>
-    <p className="modal-intro">{plan.tomadas.length} tomadas · {plan.tomadas.reduce((a, s) => a + s.duracao, 0)} segundos brutos · {plan.duracao_final} segundos na montagem.</p>
-    <label className="field">Duração final, em segundos<input type="number" min="1" max="90" value={plan.duracao_final}
-      onChange={e => setPlan({ ...plan, duracao_final: Number(e.target.value) })} /></label>
+    <p className="modal-intro">{plan.tomadas.length} cenas · {plan.tomadas.filter(ehPaga).reduce((a, s) => a + s.duracao, 0)} segundos brutos pagos · {Number(plan.duracao_final.toFixed(1))} segundos na montagem.</p>
+    {producao.narracao?.audio && (producao.narracao.seguir_voz ?? true) && plan.layout !== 'lado_a_lado'
+      ? <p className="field-note">Os cortes seguem as frases da voz: a duração final e a de cada corte se ajustam sozinhas ao salvar.</p>
+      : <label className="field">Duração final, em segundos<input type="number" min="1" max="90" step="0.1" value={plan.duracao_final}
+        onChange={e => setPlan({ ...plan, duracao_final: Number(e.target.value) })} /></label>}
     {plan.tomadas.map((shot, i) => <section className="shot-editor" key={shot.id}>
       <div className="section-heading"><h3>{shot.titulo}</h3><span>{shot.lado === 'direita' ? 'Direita · contínuo' : shot.lado === 'esquerda' ? 'Esquerda · cortes' : 'Tela cheia'}</span></div>
       {shot.arquivo && <p className="success-note">Arquivo disponível: {shot.arquivo.nome}. Será reaproveitado.</p>}
-      <div className="editor-grid"><label className="field">Modelo<select value={shot.modelo} disabled={!!shot.submit_id || !!shot.arquivo}
+      <div className="editor-grid"><label className="field">Tipo de cena<select value={shot.tipo ?? 'video'} disabled={!!shot.submit_id || !!shot.arquivo}
+        onChange={e => changeShot(i, { tipo: e.target.value as TipoTomada })}>
+        <option value="video">Vídeo gerado no Dreamina · pago</option>
+        <option value="imagem">Imagem com movimento de câmera · grátis</option></select></label>
+        {!ehPaga(shot) && <label className="field">Movimento da câmera<select value={shot.movimento_local ?? 'aproximar'}
+          onChange={e => changeShot(i, { movimento_local: e.target.value as MovimentoLocal })}>
+          {MOVIMENTOS.map(m => <option key={m.valor} value={m.valor}>{m.nome}</option>)}</select></label>}</div>
+      <p className="field-note">{ehPaga(shot)
+        ? 'Vídeo gerado: a pessoa e a roupa podem se mover. Descreva a ação no prompt; o custo é consultado antes da autorização.'
+        : 'Imagem com movimento: aproxima ou desloca a câmera sobre uma foto. A pessoa e a roupa permanecem paradas.'}</p>
+      {!ehPaga(shot) && !shot.imagens.length && <p className="field-note">Esta cena precisa de uma imagem: peça no chat ou cole uma.</p>}
+      {ehPaga(shot) && <div className="editor-grid"><label className="field">Modelo<select value={shot.modelo} disabled={!!shot.submit_id || !!shot.arquivo}
         onChange={e => changeShot(i, { modelo: e.target.value })}>
         {!models.some(m => m.model === shot.modelo) && <option>{shot.modelo}</option>}
         {models.map(m => <option key={m.model} value={m.model}>{m.model.replaceAll('_', ' ')}</option>)}</select></label>
         <label className="field">Duração bruta<input type="number" min="4" max="30" value={shot.duracao} disabled={!!shot.submit_id || !!shot.arquivo}
-          onChange={e => changeShot(i, { duracao: Number(e.target.value) })} /></label></div>
+          onChange={e => changeShot(i, { duracao: Number(e.target.value) })} /></label></div>}
       <details><summary>Direção e referências desta tomada</summary>
         <label className="field">Prompt completo<textarea rows={8} value={shot.prompt} disabled={!!shot.submit_id}
           onChange={e => changeShot(i, { prompt: e.target.value })} /></label>
