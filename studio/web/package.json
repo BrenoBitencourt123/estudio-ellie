@@ -4,7 +4,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build --configLoader native",
-    "test": "node tests/orientacao.test.mjs",
+    "test": "node --experimental-strip-types tests/orientacao.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "type": "module",
